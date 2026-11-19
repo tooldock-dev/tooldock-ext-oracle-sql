@@ -41,6 +41,9 @@ jobs:
       - name: 驗證 manifest
         run: npm run validate
 
+      - name: 單元測試
+        run: npm test
+
       - name: 檢查 tag 與 package.json 版本一致
         id: meta
         run: |

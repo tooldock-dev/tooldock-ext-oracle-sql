@@ -49,13 +49,64 @@ ToolDock 擴充：連線 Oracle 資料庫並執行 SQL 指令，查詢結果以�
   - 保留最近 50 筆執行紀錄。
   - 狀態列會顯示連線資訊；多條連線時顯示連線數，有任何一條未提交時加上 ●。命令面板的「中斷全部連線」會關閉所有連線（未提交的交易會回滾）。
 
+## 接收其他工具分享的 SQL（需要 ToolDock 1.4.0 以上）
+
+其他擴充可以用 ToolDock 的資料交換，把要執行的 SQL 打包成 `tooldock.sql` 交給這個工具。也可以從 `.tdx` 交換檔匯入：在側欄「匯入」按「開啟 .tdx」，或把檔案拖進 ToolDock 視窗。格式與接收端的規則見 ToolDock 的 `docs/EXCHANGE.md`〈6〉。
+
+收到後會切到預覽畫面，**經你確認後才會執行**：
+
+- **預覽**：
+  - 顯示標題、來源、目標、每個語句的 SQL 與分類（查詢／DML），以及參數值和參數列。
+  - 有查詢時會註明結果會傳回給哪個工具。
+  - 標示為「匯入時填寫」的參數，在這裡輸入。
+- **選擇連線**：交換包只帶邏輯目標（例如「人事資料庫」），不帶帳號密碼。實際連線由你從連線設定中選擇。
+  - 下次同一個工具送來同一個目標時，會預先選好上次的連線。
+  - 沒有記住密碼的連線，會請你輸入密碼。這個密碼只用在這次匯入，不會儲存。
+- **專用連線**：試跑和執行都會另外開一條連線，用完就關閉，不會影響編輯器裡正在使用的連線和它未提交的交易。
+- **試跑**：含有寫入的交換包必須先試跑，才能執行。
+  - 試跑會實際執行，再 ROLLBACK，並顯示預計影響的筆數和查詢結果的前幾筆。
+  - 連線或參數改變後要重新試跑。
+  - 序號（SEQUENCE／IDENTITY）會前進，觸發程序中的自主交易也不會回復。
+- **交易**：
+  - `all`（預設）：全部成功才 COMMIT。
+  - `statement`：每個語句各自 COMMIT。
+  - `none`：每次執行都直接提交。
+- **檢查條件**：影響筆數超過 `expect` 的上限時會回復，並回報失敗；這時不回傳任何查詢結果。
+- **查詢結果**：查詢結果會傳回給產生端，例如交給報表產生器做成報表。
+  - 預設每次最多回傳 10,000 列，可用設定調整；整包不超過 10 MB。
+  - `NUMBER` 以字串傳回，不會失去精度。`DATE`／`TIMESTAMP` 以帶時區的 ISO 8601 傳回。
+  - 從 `.tdx` 檔匯入時沒有產生端，結果只顯示在畫面上，可以用「⇄ 分享結果」交給其他工具。
+- **安全限制**：
+  - **DDL 一律拒絕**：Oracle 的 DDL 會隱含提交，無法回復。
+  - PL/SQL 區塊、`CALL`、`GRANT` 等語句一律拒絕。
+  - `RETURNING … INTO` 需要輸出參數，不支援；需要新產生的值時，請在同一個交易中用查詢讀回。
+  - 交換包的方言不是 `oracle` 或 `generic` 時，會顯示警告。
+- **防止重複**：同一個交換包（相同 `id`）再次匯入時會警告，要再勾選確認才能執行。
+- **稽核紀錄**：側欄「匯入」→「稽核紀錄」，保留最近 200 筆。每筆記錄每次執行、拒絕或取消的時間、交換包 id、來源、實際連線，以及每個語句的影響筆數與結果。
+
+試用：在測試用的 schema 執行 `samples/demo-schema.sql` 建立示範資料表，再匯入 `samples/overtime.tdx`。
+
+產生端的寫法：
+
+```js
+const pkg = ctx.exchange.create('tooldock.sql', {
+  dialect: 'oracle',
+  target: { name: '人事資料庫' },
+  params: { dept: { type: 'string', from: 'prompt', label: '部門', required: true } },
+  statements: [{ id: 'emps', sql: 'SELECT emp_no, name FROM employees WHERE dept = :dept', maxRows: 100 }],
+}, { title: '查詢部門員工' });
+const r = await ctx.exchange.share(pkg, { preferReceiver: 'oracle-sql' });
+if (r.status === 'delivered' && r.result.status === 'imported') console.log(r.result.data.statements[0].results[0].rows);
+```
+
 ## 設定
 
 | 設定 | 預設值 | 說明 |
 |---|---|---|
 | `oracleSql.maxRows` | 500 | 查詢結果最多取回的列數 |
-| `oracleSql.callTimeoutSeconds` | 60 | 單一指令的執行逾時 |
+| `oracleSql.callTimeoutSeconds` | 60 | 單一指令的執行逾時（也套用在交換包的試跑與執行） |
 | `oracleSql.autoCommit` | false | 自動提交 DML |
+| `oracleSql.exchangeMaxRows` | 10000 | 其他工具分享的 SQL 沒有指定 `maxRows` 時，每次查詢最多回傳的列數（上限 100,000） |
 
 ## 限制
 
@@ -69,6 +120,13 @@ npm install
 npm run dev      # 以開發模式啟動 ToolDock
 npm run debug    # 同上，並開啟後端偵錯埠 9229
 npm run pack     # 打包成 dist/*.tbx
+npm test         # tooldock.sql 解析與型別轉換的單元測試
+```
+
+`test/oracle.test.js` 會連到真正的 Oracle，測試交易、試跑、`expect`、`maxRows` 與型別轉換。沒有設定下面的環境變數時，這個測試會略過。測試會建立名稱以 `TDX_T_` 開頭的暫時資料表，結束時刪除：
+
+```bash
+ORACLE_TEST_CONNECT=localhost:1521/FREEPDB1 ORACLE_TEST_USER=tdx_test ORACLE_TEST_PASSWORD=… npm test
 ```
 
 推送 `v*` tag 後，GitHub Actions 會自動打包、簽章並建立 Release，流程見 `.github/workflows/release.yml`。

@@ -1,0 +1,76 @@
+{
+  "format": "tooldock.exchange/1",
+  "id": "5b0f8c2e-3a71-4d9e-8f42-6c1d2e9a7b30",
+  "type": "tooldock.sql",
+  "typeVersion": 1,
+  "title": "補登 11 月加班時數",
+  "description": "依簽核單 #1123 更新 2 位同仁的加班時數，並讀回結果確認",
+  "source": {
+    "extId": "help",
+    "version": "0.2.0",
+    "platform": "1.4.0"
+  },
+  "createdAt": "2026-11-19T09:30:00+08:00",
+  "payload": {
+    "dialect": "oracle",
+    "target": {
+      "name": "人事資料庫",
+      "database": "HR"
+    },
+    "transaction": "all",
+    "params": {
+      "month": {
+        "type": "string",
+        "value": "2026-11"
+      },
+      "approver": {
+        "type": "string",
+        "from": "prompt",
+        "label": "核准人",
+        "required": true
+      },
+      "now": {
+        "type": "datetime",
+        "from": "context",
+        "key": "now"
+      }
+    },
+    "statements": [
+      {
+        "id": "update-hours",
+        "sql": "UPDATE overtime SET hours = :hours, approved_by = :approver, updated_at = :now WHERE emp_no = :emp AND month = :month",
+        "rows": [
+          {
+            "emp": "A001",
+            "hours": {
+              "type": "decimal",
+              "value": "12.5"
+            }
+          },
+          {
+            "emp": "A002",
+            "hours": {
+              "type": "decimal",
+              "value": "8"
+            }
+          }
+        ],
+        "expect": {
+          "maxAffectedRows": 2
+        }
+      },
+      {
+        "id": "log",
+        "sql": "INSERT INTO overtime_log (month, approver, created_at) VALUES (:month, :approver, :now)"
+      },
+      {
+        "id": "check",
+        "sql": "SELECT emp_no, hours, approved_by FROM overtime WHERE month = :month AND emp_no IN ('A001', 'A002') ORDER BY emp_no",
+        "maxRows": 100
+      }
+    ],
+    "expect": {
+      "maxAffectedRows": 10
+    }
+  }
+}
