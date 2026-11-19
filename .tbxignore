@@ -1,3 +1,5 @@
 # 打包成 .tbx 時要排除的檔案（gitignore 語法的簡化版）
 # 預設已排除：.git、.vscode、dist/、*.tbx、*.map、devDependencies
 test/
+src-ui/
+scripts/

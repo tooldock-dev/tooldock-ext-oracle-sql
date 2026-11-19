@@ -262,7 +262,8 @@ function resultBlock(d, data, dry) {
     const affected = s.affectedRows ? `<span class="muted-sm">影響 ${s.affectedRows.reduce((/** @type {number} */ a, /** @type {number} */ b) => a + b, 0)} 筆${s.affectedRows.length > 1 ? `（${s.affectedRows.join(' + ')}）` : ''}</span>` : '';
     const results = (s.results || []).map((/** @type {any} */ r, /** @type {number} */ ri) => {
       const share = !dry && d.status !== 'pending' && /** @type {any} */ (td).exchange ? `<button class="ghost" data-share="${si}:${ri}">⇄ 分享結果…</button>` : '';
-      return `<div class="xres">${s.results.length > 1 ? `<b>第 ${ri + 1} 次</b> ` : ''}${share}${resultTable(r, dry)}</div>`;
+      const csv = !dry && r.rows.length ? `<button class="ghost" data-csv="${si}:${ri}" title="存成 CSV 檔（UTF-8，Excel 可直接開啟）">匯出 CSV</button>` : '';
+      return `<div class="xres">${s.results.length > 1 ? `<b>第 ${ri + 1} 次</b> ` : ''}${csv}${share}${resultTable(r, dry)}</div>`;
     }).join('');
     return `<div class="xres"><b>${esc(st ? st.label : s.id)}</b> ${affected}${results}</div>`;
   }).join('');
@@ -369,8 +370,8 @@ function bindDetail(d) {
     el.addEventListener('change', () => updateControls());
   });
   const on = (/** @type {string} */ sel, /** @type {() => void} */ fn) => { const b = document.querySelector(sel); if (b) /** @type {HTMLElement} */ (b).onclick = fn; };
-  on('#xDryBtn', () => run('dry'));
-  on('#xExecBtn', () => run('exec'));
+  on('#xDryBtn', () => runImport('dry'));
+  on('#xExecBtn', () => runImport('exec'));
   on('#xRejectBtn', async () => {
     if (!(await ask(`拒絕執行「${d.pkg.title}」？`, '產生端會收到「未執行」，資料庫不會有任何變更。', '拒絕'))) return;
     try { await td.invoke('exchange.reject', d.key); } catch (err) { td.toast(msgOf(err), 'error'); }
@@ -383,6 +384,17 @@ function bindDetail(d) {
     await loadImports();
   });
   on('#xNewProfile', () => { showImportCol(false); /** @type {HTMLElement} */ ($('#newProfile')).click(); });
+  col.querySelectorAll('[data-csv]').forEach((b) => {
+    /** @type {HTMLElement} */ (b).onclick = async () => {
+      const [si, ri] = String(/** @type {HTMLElement} */ (b).dataset.csv).split(':').map(Number);
+      const r = d.result && d.result.statements[si] && d.result.statements[si].results[ri];
+      if (!r) return;
+      try {
+        const file = await td.invoke('exportCsv', { columns: r.columns, rows: r.rows });
+        if (file) td.toast(`已匯出 ${file}`, 'success');
+      } catch (err) { td.toast(msgOf(err), 'error'); }
+    };
+  });
   col.querySelectorAll('[data-share]').forEach((b) => {
     /** @type {HTMLElement} */ (b).onclick = async () => {
       const [si, ri] = String(/** @type {HTMLElement} */ (b).dataset.share).split(':').map(Number);
@@ -397,7 +409,7 @@ function bindDetail(d) {
 }
 
 /** @param {'dry' | 'exec'} which */
-async function run(which) {
+async function runImport(which) {
   const d = xui.detail;
   if (!d || xui.busy) return;
   const inp = readInputs(d);

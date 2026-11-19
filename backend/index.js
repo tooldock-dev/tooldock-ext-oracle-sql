@@ -11,6 +11,8 @@ const path = require('path');
 const crypto = require('crypto');
 const oracledb = require('oracledb');
 const { splitSql, statementAt, bindNames } = require('./sql-split');
+const { columnType } = require('./exchange-exec');
+const { toTable } = require('./table-share');
 
 oracledb.fetchAsString = [oracledb.CLOB, oracledb.NCLOB];
 
@@ -20,7 +22,7 @@ oracledb.fetchAsString = [oracledb.CLOB, oracledb.NCLOB];
 
 /**
  * @typedef {{
- *   id: string, profile: Profile, conn: import('oracledb').Connection,
+ *   id: string, seq: number, profile: Profile, conn: import('oracledb').Connection,
  *   pending: boolean, running: boolean,
  *   dbName: string, schema: string, serverVersion: string, connectedAt: number
  * }} Session
@@ -29,9 +31,12 @@ oracledb.fetchAsString = [oracledb.CLOB, oracledb.NCLOB];
 const MAX_SESSIONS = 5;
 /** @type {ReturnType<typeof import('./exchange').setup> | null} 資料交換（tooldock.sql 接收端） */
 let exchangeApi = null;
-/** @type {Map<string, Session>} 連線 id（= 連線設定 id）→ 連線 */
+/**
+ * @type {Map<string, Session>} 連線 id → 連線。
+ * 同一組連線設定可以開多條：第一條的 id 等於連線設定 id，之後是「設定 id#2」「#3」…（seq 為編號）。
+ */
 const sessions = new Map();
-/** @type {Set<string>} 正在建立中的連線，計入上限，避免同時按多次超過 */
+/** @type {Set<string>} 正在建立中的連線 id，計入上限，避免同時按多次超過 */
 const connecting = new Set();
 
 /** 關閉一條連線：pending 時依 commit 決定提交或回滾 @param {Session} s @param {boolean} [commit] */
@@ -59,7 +64,7 @@ exports.activate = (ctx) => {
 
   /** @param {Session} s */
   const publicSession = (s) => ({
-    id: s.id, profile: s.profile, pending: s.pending, running: s.running,
+    id: s.id, seq: s.seq, profile: s.profile, pending: s.pending, running: s.running,
     dbName: s.dbName, schema: s.schema, serverVersion: s.serverVersion, connectedAt: s.connectedAt,
   });
 
@@ -72,6 +77,10 @@ exports.activate = (ctx) => {
 
   /** @param {Profile} p */
   const label = (p) => `${p.user}@${p.serviceName || p.host}`;
+  /** 分頁與狀態列顯示的名稱：同一組設定的第二條起加上 #編號 @param {Session} s */
+  const sessName = (s) => `${s.profile.name}${s.seq > 1 ? ` #${s.seq}` : ''}`;
+  /** @param {string} profileId */
+  const sessionsOf = (profileId) => [...sessions.values()].filter((s) => s.profile.id === profileId);
 
   const emit = () => {
     ctx.ui.emit('state', state());
@@ -81,7 +90,7 @@ exports.activate = (ctx) => {
       ? { text: '' }
       : {
         text: `🛢 ${list.length === 1 ? label(list[0].profile) : `${list.length} 條連線`}${pendingAny ? ' ●' : ''}`,
-        tooltip: list.map((s) => `${s.profile.name}（${label(s.profile)}）${s.pending ? '：有未提交的交易' : ''}`).join('\n'),
+        tooltip: list.map((s) => `${sessName(s)}（${label(s.profile)}）${s.pending ? '：有未提交的交易' : ''}`).join('\n'),
         command: 'oracleSql.open',
       };
     ctx.window.setStatus(status).catch(() => {});
@@ -104,9 +113,9 @@ exports.activate = (ctx) => {
     try {
       await closeSession(s, commit);
     } catch (err) {
-      ctx.log.warn(`中斷連線 ${s.profile.name} 時發生錯誤：${err instanceof Error ? err.message : err}`);
+      ctx.log.warn(`中斷連線 ${sessName(s)} 時發生錯誤：${err instanceof Error ? err.message : err}`);
     }
-    ctx.log.info(`已中斷連線 ${label(s.profile)}`);
+    ctx.log.info(`已中斷連線 ${sessName(s)}（${label(s.profile)}）`);
     emit();
   }
 
@@ -199,8 +208,11 @@ exports.activate = (ctx) => {
       const bound = Object.keys(binds).map((k) => ({ name: k, value: cell(binds[k].val) }));
       if (r.metaData) {
         const truncated = r.rows.length > opt.maxRows;
-        const rows = (truncated ? r.rows.slice(0, opt.maxRows) : r.rows).map((/** @type {any[]} */ row) => row.map(cell));
-        return { ok: true, kind: 'query', sql: stmt.sql, ms, columns: r.metaData.map((/** @type {any} */ m) => ({ name: m.name, type: m.dbTypeName || '' })), rows, truncated, output, bound };
+        const raw = truncated ? r.rows.slice(0, opt.maxRows) : r.rows;
+        const rows = raw.map((/** @type {any[]} */ row) => row.map(cell));
+        // type：畫面顯示的 Oracle 型別；xtype：分享成 tooldock.table 時的〈6.4〉型別
+        const columns = r.metaData.map((/** @type {any} */ m, /** @type {number} */ ci) => ({ name: m.name, type: m.dbTypeName || '', xtype: columnType(m, raw, ci) }));
+        return { ok: true, kind: 'query', sql: stmt.sql, ms, columns, rows, truncated, output, bound };
       }
       const dml = ['INSERT', 'UPDATE', 'DELETE', 'MERGE'].includes(keyword);
       if (dml && !opt.autoCommit) s.pending = true;
@@ -248,7 +260,7 @@ exports.activate = (ctx) => {
   }
 
   ctx.ui.handle('removeProfile', async (id) => {
-    await disconnect(id);
+    for (const s of sessionsOf(id)) await disconnect(s.id);
     await forgetPassword(id);
     ctx.storage.set('profiles', profiles().filter((x) => x.id !== id));
     return profiles();
@@ -259,29 +271,37 @@ exports.activate = (ctx) => {
   /* ───────── 連線 ───────── */
 
   /**
-   * 以連線設定開啟一條連線，連線 id 等於連線設定 id；已連線時直接回傳（畫面切換過去即可）。
+   * 以連線設定開啟一條連線。
+   * - 一般連線：這組設定已有連線時直接回傳第一條（畫面切換過去即可）。
+   * - opts.newSession：即使已有連線，也另外開一條（各自獨立的交易與工作區）。
    * password 為 null 時使用記住的密碼；沒有記住的密碼則回傳 { needPassword: true }。
    * remember：true = 連線成功後記住，false = 清除已記住的，undefined = 不變。
    */
   ctx.ui.handle('connect', async (id, password, opts) => {
     const p = profiles().find((x) => x.id === id);
     if (!p) throw new Error('找不到連線設定');
-    const existing = sessions.get(id);
-    if (existing) return { ...state(), session: publicSession(existing), savedPasswords: savedPasswordIds(), already: true };
-    if (connecting.has(id)) throw new Error(`「${p.name}」正在連線中`);
+    const newSession = !!(opts && opts.newSession);
+    const existing = sessionsOf(p.id).sort((a, b) => a.seq - b.seq)[0];
+    if (existing && !newSession) return { ...state(), session: publicSession(existing), savedPasswords: savedPasswordIds(), already: true };
+    if (!newSession && connecting.has(p.id)) throw new Error(`「${p.name}」正在連線中`);
     if (sessions.size + connecting.size >= MAX_SESSIONS) {
       throw new Error(`最多同時開啟 ${MAX_SESSIONS} 條連線，請先中斷其中一條`);
     }
-    connecting.add(id);
+    // 第一條用設定 id（編輯器內容依此保存），之後取最小的空號：設定 id#2、#3…
+    let seq = 1;
+    const sidOf = (/** @type {number} */ n) => (n === 1 ? p.id : `${p.id}#${n}`);
+    while (sessions.has(sidOf(seq)) || connecting.has(sidOf(seq))) seq++;
+    const sid = sidOf(seq);
+    connecting.add(sid);
     try {
-      return await openSession(p, password, opts);
+      return await openSession(p, password, opts, sid, seq);
     } finally {
-      connecting.delete(id);
+      connecting.delete(sid);
     }
   });
 
-  /** @param {Profile} p @param {any} password @param {any} opts */
-  async function openSession(p, password, opts) {
+  /** @param {Profile} p @param {any} password @param {any} opts @param {string} sid @param {number} seq */
+  async function openSession(p, password, opts, sid, seq) {
     const id = p.id;
     const remember = opts ? opts.remember : undefined;
     let pw = password;
@@ -313,10 +333,10 @@ exports.activate = (ctx) => {
     }
     /** @type {Session} */
     const s = {
-      id, profile: p, conn: c, pending: false, running: false,
+      id: sid, seq, profile: p, conn: c, pending: false, running: false,
       dbName: info.rows[0][0], schema: info.rows[0][1], serverVersion: c.oracleServerVersionString, connectedAt: Date.now(),
     };
-    sessions.set(id, s);
+    sessions.set(sid, s);
 
     // 連線已建立：記住密碼失敗只提示，不影響連線
     let rememberError = null;
@@ -333,7 +353,7 @@ exports.activate = (ctx) => {
       ctx.log.warn(`無法記住密碼：${rememberError}`);
     }
 
-    ctx.log.info(`已連線 ${p.user}@${connectString(p)}（${Date.now() - t0}ms${fromSaved ? '，使用記住的密碼' : ''}，目前 ${sessions.size} 條連線）`);
+    ctx.log.info(`已連線 ${sessName(s)}：${p.user}@${connectString(p)}（${Date.now() - t0}ms${fromSaved ? '，使用記住的密碼' : ''}，目前 ${sessions.size} 條連線）`);
     emit();
     return { ...state(), session: publicSession(s), savedPasswords: savedPasswordIds(), rememberError };
   }
@@ -478,13 +498,25 @@ exports.activate = (ctx) => {
     return r.filePath;
   });
 
+  /** 編輯器的查詢結果用 tooldock.table 分享給其他工具（例如報表產生器、資料轉換） */
+  ctx.ui.handle('shareTable', async ({ columns, rows, sql, truncated, profile }) => {
+    const exchange = /** @type {any} */ (ctx).exchange; // tooldock-types 尚未包含 ctx.exchange
+    if (!exchange) throw new Error('需要 ToolDock 1.4.0 以上才能分享結果');
+    const firstLine = String(sql || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const pkg = exchange.create('tooldock.table', toTable(columns, rows), {
+      title: `Oracle 查詢結果：${firstLine}`.slice(0, 200),
+      description: `由 Oracle SQL 工具${profile ? `（${profile}）` : ''}執行的查詢，共 ${rows.length} 筆${truncated ? '（已截斷）' : ''}`,
+    });
+    return exchange.share(pkg);
+  });
+
   ctx.ui.handle('exportCsv', async ({ columns, rows }) => {
     const r = await ctx.window.showSaveDialog({ defaultPath: `query-${Date.now()}.csv`, filters: [{ name: 'CSV', extensions: ['csv'] }] });
     if (r.canceled || !r.filePath) return null;
     /** @param {any} v */
     const esc = (v) => {
       if (v === null || v === undefined) return '';
-      const s = String(v);
+      const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
       return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     const body = [columns.map((/** @type {any} */ c) => esc(c.name)).join(','), ...rows.map((/** @type {any[]} */ row) => row.map(esc).join(','))].join('\r\n');
