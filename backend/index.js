@@ -4,6 +4,7 @@
  * Oracle SQL 工具：後端
  * 使用 node-oracledb 的 Thin 模式（純 JavaScript，不需安裝 Oracle Instant Client）。
  * 記住的密碼透過平台的 ctx.secrets（作業系統鑰匙圈保護的金鑰加密）保存；舊版平台不提供時，密碼只留在記憶體。
+ * 可同時開啟多條連線（每組連線設定一條，最多 MAX_SESSIONS 條），各自有獨立的交易狀態，畫面以連線 id（= 連線設定 id）指定要操作哪一條。
  */
 const fs = require('fs');
 const path = require('path');
@@ -17,12 +18,26 @@ oracledb.fetchAsString = [oracledb.CLOB, oracledb.NCLOB];
 /** @typedef {{ type: 'string' | 'number' | 'date' | 'null', value: string }} BindValue */
 /** @typedef {{ id: string, name: string, sql: string, updatedAt: number }} Snippet */
 
-/** @type {import('oracledb').Connection | null} */
-let conn = null;
-/** @type {Profile | null} */
-let current = null;
-let pending = false; // 有未提交的交易
-let running = false;
+/**
+ * @typedef {{
+ *   id: string, profile: Profile, conn: import('oracledb').Connection,
+ *   pending: boolean, running: boolean,
+ *   dbName: string, schema: string, serverVersion: string, connectedAt: number
+ * }} Session
+ */
+
+const MAX_SESSIONS = 5;
+/** @type {Map<string, Session>} 連線 id（= 連線設定 id）→ 連線 */
+const sessions = new Map();
+/** @type {Set<string>} 正在建立中的連線，計入上限，避免同時按多次超過 */
+const connecting = new Set();
+
+/** 關閉一條連線：pending 時依 commit 決定提交或回滾 @param {Session} s @param {boolean} [commit] */
+async function closeSession(s, commit = false) {
+  sessions.delete(s.id);
+  if (s.pending) { if (commit) await s.conn.commit(); else await s.conn.rollback(); }
+  await s.conn.close();
+}
 
 /** @param {import('tooldock-types').ExtensionContext} ctx */
 exports.activate = (ctx) => {
@@ -40,38 +55,61 @@ exports.activate = (ctx) => {
     try { return !!(ctx.secrets && await ctx.secrets.available()); } catch { return false; }
   }
 
+  /** @param {Session} s */
+  const publicSession = (s) => ({
+    id: s.id, profile: s.profile, pending: s.pending, running: s.running,
+    dbName: s.dbName, schema: s.schema, serverVersion: s.serverVersion, connectedAt: s.connectedAt,
+  });
+
   const state = () => ({
-    connected: !!conn,
-    profile: current,
-    pending,
-    running,
+    sessions: [...sessions.values()].map(publicSession),
+    maxSessions: MAX_SESSIONS,
     autoCommit: !!setting('autoCommit', false),
     maxRows: Number(setting('maxRows', 500)),
   });
 
+  /** @param {Profile} p */
+  const label = (p) => `${p.user}@${p.serviceName || p.host}`;
+
   const emit = () => {
     ctx.ui.emit('state', state());
-    ctx.window.setStatus(conn && current
-      ? { text: `🛢 ${current.user}@${current.serviceName || current.host}${pending ? ' ●' : ''}`, tooltip: pending ? 'Oracle：有未提交的交易' : 'Oracle：已連線', command: 'oracleSql.open' }
-      : { text: '' }).catch(() => {});
+    const list = [...sessions.values()];
+    const pendingAny = list.some((s) => s.pending);
+    const status = !list.length
+      ? { text: '' }
+      : {
+        text: `🛢 ${list.length === 1 ? label(list[0].profile) : `${list.length} 條連線`}${pendingAny ? ' ●' : ''}`,
+        tooltip: list.map((s) => `${s.profile.name}（${label(s.profile)}）${s.pending ? '：有未提交的交易' : ''}`).join('\n'),
+        command: 'oracleSql.open',
+      };
+    ctx.window.setStatus(status).catch(() => {});
   };
 
   /** @param {Profile} p */
   const connectString = (p) => (p.connectString && p.connectString.trim()) || `${p.host}:${p.port || 1521}/${p.serviceName}`;
 
-  async function disconnect({ commit = false } = {}) {
-    if (!conn) return;
-    const c = conn;
-    conn = null;
+  /** @param {any} sid @returns {Session} */
+  function session(sid) {
+    const s = sessions.get(String(sid || ''));
+    if (!s) throw new Error('這條連線已中斷，請重新連線');
+    return s;
+  }
+
+  /** @param {string} sid @param {{ commit?: boolean }} [opts] */
+  async function disconnect(sid, { commit = false } = {}) {
+    const s = sessions.get(sid);
+    if (!s) return;
     try {
-      if (pending) { if (commit) await c.commit(); else await c.rollback(); }
-      await c.close();
+      await closeSession(s, commit);
     } catch (err) {
-      ctx.log.warn(`中斷連線時發生錯誤：${err instanceof Error ? err.message : err}`);
+      ctx.log.warn(`中斷連線 ${s.profile.name} 時發生錯誤：${err instanceof Error ? err.message : err}`);
     }
-    pending = false;
-    current = null;
+    ctx.log.info(`已中斷連線 ${label(s.profile)}`);
     emit();
+  }
+
+  async function disconnectAll() {
+    for (const id of [...sessions.keys()]) await disconnect(id);
   }
 
   /** @param {any} v */
@@ -87,9 +125,8 @@ exports.activate = (ctx) => {
     return v;
   }
 
-  /** 讀取 DBMS_OUTPUT 緩衝區 */
-  async function readDbmsOutput() {
-    if (!conn) return [];
+  /** 讀取 DBMS_OUTPUT 緩衝區 @param {import('oracledb').Connection} conn */
+  async function readDbmsOutput(conn) {
     const lines = [];
     for (let i = 0; i < 10000; i++) {
       const r = /** @type {any} */ (await conn.execute(
@@ -139,12 +176,13 @@ exports.activate = (ctx) => {
   }
 
   /**
+   * @param {Session} s
    * @param {{ sql: string, plsql: boolean }} stmt
    * @param {{ maxRows: number, autoCommit: boolean }} opt
    * @param {Record<string, BindValue>} values
    */
-  async function runOne(stmt, opt, values) {
-    if (!conn) throw new Error('尚未連線');
+  async function runOne(s, stmt, opt, values) {
+    const { conn } = s;
     const t0 = Date.now();
     const keyword = ((stmt.sql.match(/^\s*(\w+)/) || [])[1] || '').toUpperCase();
     try {
@@ -155,7 +193,7 @@ exports.activate = (ctx) => {
         outFormat: oracledb.OUT_FORMAT_ARRAY,
       }));
       const ms = Date.now() - t0;
-      const output = await readDbmsOutput();
+      const output = await readDbmsOutput(conn);
       const bound = Object.keys(binds).map((k) => ({ name: k, value: cell(binds[k].val) }));
       if (r.metaData) {
         const truncated = r.rows.length > opt.maxRows;
@@ -163,10 +201,10 @@ exports.activate = (ctx) => {
         return { ok: true, kind: 'query', sql: stmt.sql, ms, columns: r.metaData.map((/** @type {any} */ m) => ({ name: m.name, type: m.dbTypeName || '' })), rows, truncated, output, bound };
       }
       const dml = ['INSERT', 'UPDATE', 'DELETE', 'MERGE'].includes(keyword);
-      if (dml && !opt.autoCommit) pending = true;
-      else if (['COMMIT', 'ROLLBACK'].includes(keyword)) pending = false;
-      else if (['BEGIN', 'DECLARE'].includes(keyword)) { if (!opt.autoCommit) pending = true; } // 匿名區塊可能含 DML
-      else if (!['SAVEPOINT', 'SET', 'LOCK'].includes(keyword)) pending = false; // DDL（含 CREATE PROCEDURE 等）會隱含提交
+      if (dml && !opt.autoCommit) s.pending = true;
+      else if (['COMMIT', 'ROLLBACK'].includes(keyword)) s.pending = false;
+      else if (['BEGIN', 'DECLARE'].includes(keyword)) { if (!opt.autoCommit) s.pending = true; } // 匿名區塊可能含 DML
+      else if (!['SAVEPOINT', 'SET', 'LOCK'].includes(keyword)) s.pending = false; // DDL（含 CREATE PROCEDURE 等）會隱含提交
       return { ok: true, kind: dml ? 'dml' : stmt.plsql ? 'plsql' : 'other', sql: stmt.sql, ms, rowsAffected: r.rowsAffected ?? null, output, bound };
     } catch (e) {
       const err = /** @type {any} */ (e);
@@ -207,6 +245,7 @@ exports.activate = (ctx) => {
   }
 
   ctx.ui.handle('removeProfile', async (id) => {
+    await disconnect(id);
     await forgetPassword(id);
     ctx.storage.set('profiles', profiles().filter((x) => x.id !== id));
     return profiles();
@@ -217,12 +256,30 @@ exports.activate = (ctx) => {
   /* ───────── 連線 ───────── */
 
   /**
+   * 以連線設定開啟一條連線，連線 id 等於連線設定 id；已連線時直接回傳（畫面切換過去即可）。
    * password 為 null 時使用記住的密碼；沒有記住的密碼則回傳 { needPassword: true }。
    * remember：true = 連線成功後記住，false = 清除已記住的，undefined = 不變。
    */
   ctx.ui.handle('connect', async (id, password, opts) => {
     const p = profiles().find((x) => x.id === id);
     if (!p) throw new Error('找不到連線設定');
+    const existing = sessions.get(id);
+    if (existing) return { ...state(), session: publicSession(existing), savedPasswords: savedPasswordIds(), already: true };
+    if (connecting.has(id)) throw new Error(`「${p.name}」正在連線中`);
+    if (sessions.size + connecting.size >= MAX_SESSIONS) {
+      throw new Error(`最多同時開啟 ${MAX_SESSIONS} 條連線，請先中斷其中一條`);
+    }
+    connecting.add(id);
+    try {
+      return await openSession(p, password, opts);
+    } finally {
+      connecting.delete(id);
+    }
+  });
+
+  /** @param {Profile} p @param {any} password @param {any} opts */
+  async function openSession(p, password, opts) {
+    const id = p.id;
     const remember = opts ? opts.remember : undefined;
     let pw = password;
     let fromSaved = false;
@@ -231,7 +288,6 @@ exports.activate = (ctx) => {
       if (pw == null) return { needPassword: true };
       fromSaved = true;
     }
-    await disconnect();
     const t0 = Date.now();
     let c;
     try {
@@ -242,27 +298,44 @@ exports.activate = (ctx) => {
       if (fromSaved && err.errorNum === 1017) return { needPassword: true, reason: '記住的密碼已無法登入，請重新輸入' };
       throw err;
     }
-    c.callTimeout = Math.max(1, Number(setting('callTimeoutSeconds', 60))) * 1000;
-    await c.execute('BEGIN DBMS_OUTPUT.ENABLE(NULL); END;');
-    const info = /** @type {any} */ (await c.execute("SELECT SYS_CONTEXT('USERENV','DB_NAME'), SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM DUAL"));
-    conn = c;
-    current = p;
-    pending = false;
+    /** @type {any} */
+    let info;
+    try {
+      c.callTimeout = Math.max(1, Number(setting('callTimeoutSeconds', 60))) * 1000;
+      await c.execute('BEGIN DBMS_OUTPUT.ENABLE(NULL); END;');
+      info = await c.execute("SELECT SYS_CONTEXT('USERENV','DB_NAME'), SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM DUAL");
+    } catch (err) {
+      await c.close().catch(() => {});
+      throw err;
+    }
+    /** @type {Session} */
+    const s = {
+      id, profile: p, conn: c, pending: false, running: false,
+      dbName: info.rows[0][0], schema: info.rows[0][1], serverVersion: c.oracleServerVersionString, connectedAt: Date.now(),
+    };
+    sessions.set(id, s);
 
-    if (remember === true && !fromSaved) {
-      if (!(await secretsAvailable())) throw new Error('這個平台版本或作業系統不支援安全儲存，無法記住密碼');
-      await /** @type {any} */ (ctx.secrets).set(secretKey(id), String(pw));
-      ctx.storage.set('savedPasswords', [...new Set([...savedPasswordIds(), id])]);
-    } else if (remember === false) {
-      await forgetPassword(id);
+    // 連線已建立：記住密碼失敗只提示，不影響連線
+    let rememberError = null;
+    try {
+      if (remember === true && !fromSaved) {
+        if (!(await secretsAvailable())) throw new Error('這個平台版本或作業系統不支援安全儲存，無法記住密碼');
+        await /** @type {any} */ (ctx.secrets).set(secretKey(id), String(pw));
+        ctx.storage.set('savedPasswords', [...new Set([...savedPasswordIds(), id])]);
+      } else if (remember === false) {
+        await forgetPassword(id);
+      }
+    } catch (err) {
+      rememberError = err instanceof Error ? err.message : String(err);
+      ctx.log.warn(`無法記住密碼：${rememberError}`);
     }
 
-    ctx.log.info(`已連線 ${p.user}@${connectString(p)}（${Date.now() - t0}ms${fromSaved ? '，使用記住的密碼' : ''}）`);
+    ctx.log.info(`已連線 ${p.user}@${connectString(p)}（${Date.now() - t0}ms${fromSaved ? '，使用記住的密碼' : ''}，目前 ${sessions.size} 條連線）`);
     emit();
-    return { ...state(), serverVersion: c.oracleServerVersionString, dbName: info.rows[0][0], schema: info.rows[0][1], savedPasswords: savedPasswordIds() };
-  });
+    return { ...state(), session: publicSession(s), savedPasswords: savedPasswordIds(), rememberError };
+  }
 
-  ctx.ui.handle('disconnect', async (opts) => { await disconnect(opts || {}); return state(); });
+  ctx.ui.handle('disconnect', async (sid, opts) => { await disconnect(String(sid || ''), opts || {}); return state(); });
 
   /* ───────── 執行 ───────── */
 
@@ -270,9 +343,9 @@ exports.activate = (ctx) => {
    * binds 未提供而 SQL 含 :參數 時，回傳 { needBinds: [{ name, last }] } 讓畫面詢問；
    * 提供 binds（以大寫名稱為 key）時直接執行，並記住這次的值。
    */
-  ctx.ui.handle('execute', async ({ text, cursor, mode, binds }) => {
-    if (!conn) throw new Error('尚未連線');
-    if (running) throw new Error('上一個指令還在執行中');
+  ctx.ui.handle('execute', async ({ sid, text, cursor, mode, binds }) => {
+    const s = session(sid);
+    if (s.running) throw new Error('這條連線上一個指令還在執行中');
     const list = /** @type {any[]} */ (mode === 'all' || mode === 'selection'
       ? splitSql(text)
       : [statementAt(text, Number(cursor) || 0)].filter(Boolean));
@@ -292,17 +365,17 @@ exports.activate = (ctx) => {
     if (names.length) ctx.storage.set('bindValues', { ...remembered, ...values });
 
     const opt = { maxRows: Math.max(1, Number(setting('maxRows', 500))), autoCommit: !!setting('autoCommit', false) };
-    running = true;
+    s.running = true;
     emit();
     const results = [];
     try {
       for (const stmt of list) {
-        const r = await runOne(stmt, opt, values);
+        const r = await runOne(s, stmt, opt, values);
         results.push(r);
         if (!r.ok) break; // 腳本遇到錯誤即停止
       }
     } finally {
-      running = false;
+      s.running = false;
       const entry = list.map((s) => s.sql).join(';\n');
       ctx.storage.set('history', [entry, ...ctx.storage.get('history', []).filter((/** @type {string} */ h) => h !== entry)].slice(0, 50));
       emit();
@@ -310,30 +383,31 @@ exports.activate = (ctx) => {
     return { results, state: state(), executed: results.length, total: list.length, range: list.length === 1 ? { start: list[0].start, end: list[0].end } : null };
   });
 
-  ctx.ui.handle('cancel', async () => {
-    if (conn && running) await conn.break();
+  ctx.ui.handle('cancel', async (sid) => {
+    const s = sessions.get(String(sid || ''));
+    if (s && s.running) await s.conn.break();
     return true;
   });
 
-  ctx.ui.handle('commit', async () => { if (!conn) throw new Error('尚未連線'); await conn.commit(); pending = false; emit(); return state(); });
-  ctx.ui.handle('rollback', async () => { if (!conn) throw new Error('尚未連線'); await conn.rollback(); pending = false; emit(); return state(); });
+  ctx.ui.handle('commit', async (sid) => { const s = session(sid); await s.conn.commit(); s.pending = false; emit(); return state(); });
+  ctx.ui.handle('rollback', async (sid) => { const s = session(sid); await s.conn.rollback(); s.pending = false; emit(); return state(); });
   ctx.ui.handle('setAutoCommit', async (on) => { await ctx.settings.update('oracleSql.autoCommit', !!on); emit(); return state(); });
 
   /* ───────── 資料表瀏覽 ───────── */
 
-  /** @param {string} sql @param {Record<string, any>} [binds] */
-  async function meta(sql, binds = {}) {
-    if (!conn) throw new Error('尚未連線');
-    if (running) throw new Error('指令執行中，請稍後再試');
-    const r = /** @type {any} */ (await conn.execute(sql, binds, { outFormat: oracledb.OUT_FORMAT_OBJECT, maxRows: 5000 }));
+  /** @param {any} sid @param {string} sql @param {Record<string, any>} [binds] */
+  async function meta(sid, sql, binds = {}) {
+    const s = session(sid);
+    if (s.running) throw new Error('指令執行中，請稍後再試');
+    const r = /** @type {any} */ (await s.conn.execute(sql, binds, { outFormat: oracledb.OUT_FORMAT_OBJECT, maxRows: 5000 }));
     return r.rows;
   }
 
-  ctx.ui.handle('listSchemas', async () => {
-    const own = /** @type {any} */ (current) ? (await meta("SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS S FROM DUAL"))[0].S : null;
+  ctx.ui.handle('listSchemas', async ({ sid }) => {
+    const own = (await meta(sid, "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS S FROM DUAL"))[0].S;
     let rows = [];
     try {
-      rows = await meta("SELECT DISTINCT owner AS S FROM all_objects WHERE object_type IN ('TABLE','VIEW') AND owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N') ORDER BY 1");
+      rows = await meta(sid, "SELECT DISTINCT owner AS S FROM all_objects WHERE object_type IN ('TABLE','VIEW') AND owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N') ORDER BY 1");
     } catch {
       rows = []; // 舊版資料庫沒有 oracle_maintained 欄位
     }
@@ -341,7 +415,7 @@ exports.activate = (ctx) => {
     return { current: own, schemas: [...new Set([own, ...list].filter(Boolean))] };
   });
 
-  ctx.ui.handle('listObjects', async ({ owner }) => meta(`
+  ctx.ui.handle('listObjects', async ({ sid, owner }) => meta(sid, `
     SELECT o.object_name AS name, o.object_type AS type, t.num_rows AS num_rows, c.comments AS comments
     FROM all_objects o
     LEFT JOIN all_tables t ON t.owner = o.owner AND t.table_name = o.object_name
@@ -349,8 +423,8 @@ exports.activate = (ctx) => {
     WHERE o.owner = :owner AND o.object_type IN ('TABLE', 'VIEW') AND o.object_name NOT LIKE 'BIN$%'
     ORDER BY o.object_type, o.object_name`, { owner: String(owner || '').toUpperCase() }));
 
-  ctx.ui.handle('describe', async ({ owner, name }) => {
-    const rows = await meta(`
+  ctx.ui.handle('describe', async ({ sid, owner, name }) => {
+    const rows = await meta(sid, `
       SELECT c.column_id AS pos, c.column_name AS name, c.data_type AS type, c.data_length AS len, c.char_length AS char_len,
              c.data_precision AS prec, c.data_scale AS scale, c.nullable AS nullable, cc.comments AS comments,
              (SELECT 'Y' FROM all_cons_columns k JOIN all_constraints n ON n.owner = k.owner AND n.constraint_name = k.constraint_name
@@ -417,7 +491,7 @@ exports.activate = (ctx) => {
 
   ctx.subscriptions.push(
     ctx.commands.register('oracleSql.open', () => ctx.window.openView('oracleSql.main')),
-    ctx.commands.register('oracleSql.disconnect', () => disconnect()),
+    ctx.commands.register('oracleSql.disconnect', () => disconnectAll()),
     ctx.settings.onDidChange(() => emit()),
   );
 };
@@ -427,15 +501,13 @@ exports.activate = (ctx) => {
  * @param {import('tooldock-types').ExtensionContext} ctx
  */
 exports.onBeforeQuit = async (ctx) => {
-  if (!conn) return;
-  try {
-    if (pending) { await conn.rollback(); ctx.log.warn('平台結束：未提交的交易已回滾'); }
-    await conn.close();
-  } catch { /* 忽略 */ }
-  conn = null;
+  for (const s of [...sessions.values()]) {
+    if (s.pending) ctx.log.warn(`平台結束：「${s.profile.name}」未提交的交易已回滾`);
+    try { await closeSession(s, false); } catch { /* 忽略 */ }
+  }
 };
 
 exports.deactivate = async () => {
-  if (conn) { try { await conn.rollback(); await conn.close(); } catch { /* 忽略 */ } }
-  conn = null;
+  await Promise.all([...sessions.values()].map((s) => closeSession({ ...s, pending: true }, false).catch(() => {})));
+  sessions.clear();
 };

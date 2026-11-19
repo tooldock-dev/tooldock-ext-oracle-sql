@@ -15,9 +15,14 @@ const autoCommit = $('#autoCommit');
 const schemaSel = $('#schema');
 
 /** @typedef {{ id: string, name: string, host: string, port: number, serviceName: string, user: string, connectString?: string }} Profile */
-/** @typedef {{ connected: boolean, profile: Profile | null, pending: boolean, running: boolean, autoCommit: boolean, maxRows: number }} State */
+/** @typedef {{ id: string, profile: Profile, pending: boolean, running: boolean, dbName: string, schema: string, serverVersion: string }} Session */
+/** @typedef {{ sessions: Session[], maxSessions: number, autoCommit: boolean, maxRows: number }} State */
 /** @typedef {{ id: string, name: string, sql: string, updatedAt: number }} Snippet */
 /** @typedef {{ NAME: string, TYPE: string, NUM_ROWS: number | null, COMMENTS: string | null }} DbObject */
+/**
+ * 每條連線各自的工作區：切換連線時保存 / 還原
+ * @typedef {{ sql: string, sel: [number, number], results: any[], active: number, objects: DbObject[], schemas: string[], currentSchema: string, schema: string, selectedObject: string, foot: string, loadedSnippet: Snippet | null }} Workspace
+ */
 
 const ui = {
   /** @type {Profile[]} */ profiles: [],
@@ -25,51 +30,208 @@ const ui = {
   secretsAvailable: false,
   /** @type {string[]} */ history: [],
   /** @type {Snippet[]} */ snippets: [],
-  /** @type {State} */ state: { connected: false, profile: null, pending: false, running: false, autoCommit: false, maxRows: 500 },
+  /** @type {State} */ state: { sessions: [], maxSessions: 5, autoCommit: false, maxRows: 500 },
+  /** @type {string | null} 目前操作的連線 id（= 連線設定 id） */ activeSid: null,
   /** @type {any[]} */ results: [],
   active: 0,
   /** @type {DbObject[]} */ objects: [],
+  /** @type {string[]} */ schemas: [],
   currentSchema: '',
   selectedObject: '',
   /** @type {Snippet | null} */ loadedSnippet: null,
 };
+/** @type {Map<string, Workspace>} */
+const workspaces = new Map();
 
 /** @param {unknown} err */
 const msgOf = (err) => (err instanceof Error ? err.message : String(err));
 /** @param {string} sel */
 const btn = (sel) => /** @type {HTMLButtonElement} */ ($(sel));
+/** @returns {Session | null} */
+const cur = () => ui.state.sessions.find((s) => s.id === ui.activeSid) || null;
+/** @param {Profile} p */
+const target = (p) => `${p.user}@${p.connectString || `${p.host}:${p.port}/${p.serviceName}`}`;
+
+/* ───────── 編輯器內容（每條連線各自保存） ───────── */
+
+/** @param {string | null} sid */
+const sqlKey = (sid) => `sql:${sid || '_'}`;
+/** @param {string | null} sid @returns {string | null} */
+function loadSql(sid) {
+  try { return localStorage.getItem(sqlKey(sid)); } catch { return null; }
+}
+function storeSql() {
+  try { localStorage.setItem(sqlKey(ui.activeSid), editor.value); } catch { /* 忽略 */ }
+}
 
 /* ───────── 狀態 ───────── */
 
-/** @param {State} s */
+/** 後端狀態（所有連線）變更 @param {State} s */
 function applyState(s) {
-  const wasConnected = ui.state.connected;
-  ui.state = s;
-  const c = s.connected;
-  $('#connectBtn').textContent = c ? '中斷連線' : '連線';
-  $('#connectBtn').className = c ? 'secondary' : '';
-  btn('#runBtn').disabled = !c || s.running;
-  btn('#runAllBtn').disabled = !c || s.running;
-  btn('#cancelBtn').disabled = !s.running;
-  btn('#commitBtn').disabled = !c || !s.pending;
-  btn('#rollbackBtn').disabled = !c || !s.pending;
-  profileSel.disabled = c;
-  autoCommit.checked = s.autoCommit;
-  $('#connInfo').innerHTML = c && s.profile
-    ? `<span class="badge ok">已連線</span> ${td.escape(s.profile.user)}@${td.escape(s.profile.connectString || `${s.profile.host}:${s.profile.port}/${s.profile.serviceName}`)}${s.pending ? ' <span class="badge warn">有未提交的交易</span>' : ''}`
-    : '<span class="badge">未連線</span>';
-  $('#footRight').textContent = s.running ? '執行中…' : `最多顯示 ${s.maxRows} 列　${s.autoCommit ? '自動提交' : '手動提交'}`;
-  if (wasConnected && !c) { ui.objects = []; renderObjects(); schemaSel.innerHTML = ''; }
+  ui.state = { sessions: s.sessions, maxSessions: s.maxSessions, autoCommit: s.autoCommit, maxRows: s.maxRows };
+  const ids = new Set(s.sessions.map((x) => x.id));
+  for (const id of [...workspaces.keys()]) if (!ids.has(id)) workspaces.delete(id);
+  if (ui.activeSid && !ids.has(ui.activeSid)) {
+    // 目前的連線已中斷（例如從 × 、狀態列或指令中斷），切到剩下的連線
+    ui.activeSid = null;
+    const next = s.sessions[0];
+    if (next) { switchTo(next.id); return; }
+    resetWorkspace();
+  }
+  renderSessions();
+  renderProfiles();
+  applyActive();
+}
+
+/** 依目前連線更新按鈕與資訊列 */
+function applyActive() {
+  const s = cur();
+  const st = ui.state;
+  btn('#runBtn').disabled = !s || s.running;
+  btn('#runAllBtn').disabled = !s || s.running;
+  btn('#cancelBtn').disabled = !(s && s.running);
+  btn('#commitBtn').disabled = !(s && s.pending);
+  btn('#rollbackBtn').disabled = !(s && s.pending);
+  autoCommit.checked = st.autoCommit;
+
+  const selected = profileSel.value;
+  const selectedOpen = st.sessions.some((x) => x.id === selected);
+  const full = st.sessions.length >= st.maxSessions;
+  $('#connectBtn').textContent = selectedOpen ? (selected === ui.activeSid ? '已連線' : '切換') : '連線';
+  btn('#connectBtn').disabled = (selectedOpen && selected === ui.activeSid) || (!selectedOpen && full && ui.profiles.length > 0);
+  btn('#connectBtn').title = !selectedOpen && full
+    ? `已達 ${st.maxSessions} 條連線上限，請先中斷其中一條`
+    : '開啟這組連線；已開啟時切換過去（最多同時 5 條）';
+
+  $('#connInfo').innerHTML = s
+    ? `<span class="badge ok">${td.escape(s.profile.name)}</span> ${td.escape(target(s.profile))}${s.pending ? ' <span class="badge warn">有未提交的交易</span>' : ''}`
+    : st.sessions.length ? '' : '<span class="badge">未連線</span>';
+  $('#footRight').textContent = s && s.running ? '執行中…' : `最多顯示 ${st.maxRows} 列　${st.autoCommit ? '自動提交' : '手動提交'}`;
+}
+
+function renderSessions() {
+  const list = ui.state.sessions;
+  const bar = $('#sessBar');
+  bar.hidden = !list.length;
+  bar.innerHTML = list.map((s, i) => {
+    const dot = s.running ? 'running' : s.pending ? 'pending' : '';
+    const tip = `${target(s.profile)}${s.pending ? '\n有未提交的交易' : ''}${s.running ? '\n執行中' : ''}\n⌘/Ctrl + ${i + 1} 切換`;
+    return `<button class="sess ${s.id === ui.activeSid ? 'on' : ''}" data-sid="${td.escape(s.id)}" title="${td.escape(tip)}">
+      <span class="dot ${dot}"></span>${td.escape(s.profile.name)}<span class="x" data-close="${td.escape(s.id)}" title="中斷這條連線">×</span></button>`;
+  }).join('') + `<span id="sessCount">${list.length} / ${ui.state.maxSessions} 條連線</span>`;
+}
+
+$('#sessBar').addEventListener('click', (e) => {
+  const t = /** @type {HTMLElement} */ (e.target);
+  const x = t.closest('[data-close]');
+  if (x instanceof HTMLElement) { e.stopPropagation(); closeSession(String(x.dataset.close)); return; }
+  const b = t.closest('.sess');
+  if (b instanceof HTMLElement) switchTo(String(b.dataset.sid));
+});
+$('#sessBar').addEventListener('auxclick', (e) => {
+  const b = /** @type {HTMLElement} */ (e.target).closest('.sess');
+  if (e.button === 1 && b instanceof HTMLElement) closeSession(String(b.dataset.sid));
+});
+
+function saveWorkspace() {
+  if (!ui.activeSid) return;
+  workspaces.set(ui.activeSid, {
+    sql: editor.value,
+    sel: [editor.selectionStart, editor.selectionEnd],
+    results: ui.results,
+    active: ui.active,
+    objects: ui.objects,
+    schemas: ui.schemas,
+    currentSchema: ui.currentSchema,
+    schema: schemaSel.value,
+    selectedObject: ui.selectedObject,
+    foot: $('#footMsg').textContent || '',
+    loadedSnippet: ui.loadedSnippet,
+  });
+}
+
+/** 沒有連線時：清空結果與資料表，編輯器內容保留 */
+function resetWorkspace() {
+  ui.results = [];
+  ui.active = 0;
+  ui.objects = [];
+  ui.schemas = [];
+  ui.currentSchema = '';
+  ui.selectedObject = '';
+  renderSchemaOptions('');
+  renderObjects();
+  showEmpty();
+}
+
+/** 切換目前操作的連線：保存目前的編輯器、結果、資料表，還原目標連線的 @param {string} sid */
+async function switchTo(sid) {
+  if (sid === ui.activeSid) return;
+  saveWorkspace();
+  ui.activeSid = sid;
+  const w = workspaces.get(sid);
+  if (w) {
+    editor.value = w.sql;
+    ui.results = w.results;
+    ui.active = w.active;
+    ui.objects = w.objects;
+    ui.schemas = w.schemas;
+    ui.currentSchema = w.currentSchema;
+    ui.selectedObject = w.selectedObject;
+    ui.loadedSnippet = w.loadedSnippet;
+    renderSchemaOptions(w.schema);
+    setFoot(w.foot);
+    editor.setSelectionRange(w.sel[0], w.sel[1]);
+  } else {
+    // 第一次切到這條連線：沿用它上次的 SQL；沒有的話保留目前編輯器內容
+    const saved = loadSql(sid);
+    if (saved != null) { editor.value = saved; ui.loadedSnippet = null; }
+    ui.results = [];
+    ui.active = 0;
+    ui.objects = [];
+    ui.schemas = [];
+    ui.currentSchema = '';
+    ui.selectedObject = '';
+    renderSchemaOptions('');
+    setFoot('');
+  }
+  storeSql();
+  const s = cur();
+  if (s && ui.profiles.some((p) => p.id === s.profile.id)) profileSel.value = s.profile.id;
+  renderSessions();
+  applyActive();
+  renderObjects();
+  if (ui.results.length) renderResults(); else showEmpty();
+  editor.focus();
+  if (!w || !w.schemas.length || !w.objects.length) await loadSchemas();
+}
+
+/** 中斷一條連線；有未提交的交易時先詢問 @param {string} sid */
+async function closeSession(sid) {
+  const s = ui.state.sessions.find((x) => x.id === sid);
+  if (!s) return;
+  if (s.running) { td.toast(`「${s.profile.name}」還有指令在執行，請先停止`, 'warn'); return; }
+  let opts = {};
+  if (s.pending) {
+    const r = await td.dialog.message({ type: 'question', message: `「${s.profile.name}」有未提交的交易`, detail: '中斷連線前要提交（Commit）還是回滾（Rollback）？', buttons: ['Commit', 'Rollback', '取消'], defaultId: 1, cancelId: 2 });
+    if (r.response === 2) return;
+    opts = { commit: r.response === 0 };
+  }
+  try {
+    applyState(await td.invoke('disconnect', sid, opts));
+    setFoot(`已中斷「${s.profile.name}」`);
+  } catch (err) { td.toast(msgOf(err), 'error'); }
 }
 
 function renderProfiles() {
-  const cur = profileSel.value;
+  const selected = profileSel.value;
+  const open = new Set(ui.state.sessions.map((s) => s.id));
   profileSel.innerHTML = ui.profiles.length
-    ? ui.profiles.map((p) => `<option value="${p.id}">${ui.savedPasswords.includes(p.id) ? '🔑 ' : ''}${td.escape(p.name)}</option>`).join('')
+    ? ui.profiles.map((p) => `<option value="${p.id}">${open.has(p.id) ? '● ' : ''}${ui.savedPasswords.includes(p.id) ? '🔑 ' : ''}${td.escape(p.name)}</option>`).join('')
     : '<option value="">（尚無連線設定）</option>';
-  if (ui.profiles.some((p) => p.id === cur)) profileSel.value = cur;
-  else if (ui.state.profile) profileSel.value = ui.state.profile.id;
+  if (ui.profiles.some((p) => p.id === selected)) profileSel.value = selected;
+  else if (ui.activeSid && ui.profiles.some((p) => p.id === ui.activeSid)) profileSel.value = ui.activeSid;
 }
+profileSel.addEventListener('change', applyActive);
 
 async function refresh() {
   const s = await td.invoke('state');
@@ -78,9 +240,12 @@ async function refresh() {
   ui.secretsAvailable = s.secretsAvailable;
   ui.history = s.history;
   ui.snippets = s.snippets;
+  applyState(s);
   renderProfiles();
   renderSnippets();
-  applyState(s);
+  applyActive();
+  // 畫面重新載入時後端連線還在：切到第一條
+  if (!ui.activeSid && s.sessions.length) await switchTo(s.sessions[0].id);
 }
 
 /* ───────── 連線設定 ───────── */
@@ -112,6 +277,8 @@ form.addEventListener('submit', async (e) => {
     dlg.close();
     await refresh();
     profileSel.value = saved.id;
+    applyActive();
+    if (ui.state.sessions.some((x) => x.id === saved.id)) td.toast('連線設定已儲存，重新連線後才會套用', 'info');
   } catch (err) { td.toast(msgOf(err), 'error'); }
 });
 $('#cancelDlg').onclick = () => dlg.close();
@@ -119,7 +286,9 @@ $('#newProfile').onclick = () => openProfile(null);
 $('#editProfile').onclick = () => openProfile(ui.profiles.find((p) => p.id === profileSel.value) || null);
 $('#removeProfile').onclick = async () => {
   const id = /** @type {any} */ (form.elements).profileId.value;
-  const r = await td.dialog.message({ type: 'warning', message: '刪除這個連線設定？', detail: '記住的密碼也會一併清除。', buttons: ['刪除', '取消'], defaultId: 1, cancelId: 1 });
+  const open = ui.state.sessions.find((x) => x.id === id);
+  const detail = `記住的密碼也會一併清除。${open ? `\n這組連線目前開啟中，會先中斷${open.pending ? '（未提交的交易會回滾）' : ''}。` : ''}`;
+  const r = await td.dialog.message({ type: 'warning', message: '刪除這個連線設定？', detail, buttons: ['刪除', '取消'], defaultId: 1, cancelId: 1 });
   if (r.response !== 0) return;
   await td.invoke('removeProfile', id);
   dlg.close();
@@ -140,19 +309,25 @@ $('#forgetPw').onclick = async () => {
 /** @param {any} r */
 async function afterConnect(r) {
   ui.savedPasswords = r.savedPasswords || ui.savedPasswords;
-  renderProfiles();
   applyState(r);
-  setFoot(`已連線：${r.dbName}（schema ${r.schema}），Oracle ${r.serverVersion}`);
-  editor.focus();
-  await loadSchemas();
+  renderProfiles();
+  await switchTo(r.session.id);
+  applyActive();
+  if (!r.already) setFoot(`已連線「${r.session.profile.name}」：${r.session.dbName}（schema ${r.session.schema}），Oracle ${r.session.serverVersion}`);
+  if (r.rememberError) td.toast(r.rememberError, 'warn');
 }
 
-/** @param {string} [reason] */
-function askPassword(reason) {
-  const p = ui.profiles.find((x) => x.id === profileSel.value);
-  if (!p) return;
+/** @param {string} title @param {unknown} err */
+function connectFailed(title, err) {
+  applyActive();
+  td.dialog.message({ type: 'error', message: title, detail: msgOf(err) });
+}
+
+/** @param {Profile} p @param {string} [reason] */
+function askPassword(p, reason) {
   $('#pwTarget').textContent = p.name;
   pwForm.reset();
+  pwForm.dataset.pid = p.id;
   $('#pwReason').hidden = !reason;
   $('#pwReason').textContent = reason || '';
   $('#rememberRow').hidden = !ui.secretsAvailable;
@@ -161,28 +336,19 @@ function askPassword(reason) {
 }
 
 $('#connectBtn').onclick = async () => {
-  if (ui.state.connected) {
-    let opts = {};
-    if (ui.state.pending) {
-      const r = await td.dialog.message({ type: 'question', message: '有未提交的交易', detail: '中斷連線前要提交（Commit）還是回滾（Rollback）？', buttons: ['Commit', 'Rollback', '取消'], defaultId: 1, cancelId: 2 });
-      if (r.response === 2) return;
-      opts = { commit: r.response === 0 };
-    }
-    applyState(await td.invoke('disconnect', opts));
-    return;
-  }
   const p = ui.profiles.find((x) => x.id === profileSel.value);
   if (!p) { openProfile(null); return; }
-  if (!ui.savedPasswords.includes(p.id)) { askPassword(); return; }
+  if (ui.state.sessions.some((s) => s.id === p.id)) { await switchTo(p.id); return; }
+  if (!ui.savedPasswords.includes(p.id)) { askPassword(p); return; }
   // 有記住密碼：直接連線
-  $('#connInfo').innerHTML = '<span class="badge info">連線中…</span>';
+  $('#connInfo').innerHTML = `<span class="badge info">連線到「${td.escape(p.name)}」中…</span>`;
+  btn('#connectBtn').disabled = true;
   try {
     const r = await td.invoke('connect', p.id, null);
-    if (r.needPassword) { applyState(ui.state); askPassword(r.reason); return; }
+    if (r.needPassword) { applyActive(); askPassword(p, r.reason); return; }
     await afterConnect(r);
   } catch (err) {
-    applyState(ui.state);
-    showMessage('連線失敗', msgOf(err), true);
+    connectFailed(`無法連線到「${p.name}」`, err);
   }
 };
 $('#pwCancel').onclick = () => pwDlg.close();
@@ -191,14 +357,17 @@ pwForm.addEventListener('submit', async (e) => {
   const fd = new FormData(pwForm);
   const password = String(fd.get('password') || '');
   const remember = ui.secretsAvailable && fd.get('remember') === 'on';
+  const p = ui.profiles.find((x) => x.id === pwForm.dataset.pid);
   pwDlg.close();
-  $('#connInfo').innerHTML = '<span class="badge info">連線中…</span>';
+  if (!p) return;
+  $('#connInfo').innerHTML = `<span class="badge info">連線到「${td.escape(p.name)}」中…</span>`;
+  btn('#connectBtn').disabled = true;
   try {
-    await afterConnect(await td.invoke('connect', profileSel.value, password, { remember: remember || undefined }));
-    if (remember) td.toast('已記住密碼，下次連線不需再輸入', 'success');
+    const r = await td.invoke('connect', p.id, password, { remember: remember || undefined });
+    await afterConnect(r);
+    if (remember && !r.rememberError) td.toast('已記住密碼，下次連線不需再輸入', 'success');
   } catch (err) {
-    applyState(ui.state);
-    showMessage('連線失敗', msgOf(err), true);
+    connectFailed(`無法連線到「${p.name}」`, err);
   }
 });
 
@@ -268,11 +437,13 @@ $('#bindCancel').onclick = () => { bindDlg.close(); if (bindResolve) bindResolve
 
 /** @param {'current' | 'all'} which */
 async function run(which) {
-  if (!ui.state.connected || ui.state.running) return;
+  const s = cur();
+  if (!s || s.running) return;
+  const sid = s.id;
   const selected = editor.selectionStart !== editor.selectionEnd;
   const text = selected ? editor.value.slice(editor.selectionStart, editor.selectionEnd) : editor.value;
   const mode = which === 'all' ? 'all' : selected ? 'selection' : 'current';
-  const req = { text, cursor: editor.selectionStart, mode };
+  const req = { sid, text, cursor: editor.selectionStart, mode };
   try {
     let r = await td.invoke('execute', req);
     if (r.needBinds) {
@@ -285,15 +456,25 @@ async function run(which) {
       setFoot('執行中…');
     }
     applyState(r.state);
-    ui.results = r.results;
-    if (r.range && mode === 'current') editor.setSelectionRange(r.range.start, Math.min(r.range.end + 1, editor.value.length));
     const failed = r.results.find((/** @type {any} */ x) => !x.ok);
-    ui.active = failed ? r.results.indexOf(failed) : Math.max(0, r.results.findIndex((/** @type {any} */ x) => x.kind === 'query'));
-    renderResults();
-    const total = r.results.reduce((/** @type {number} */ s, /** @type {any} */ x) => s + x.ms, 0);
-    setFoot(failed ? `第 ${r.results.length} / ${r.total} 句發生錯誤，後續指令未執行` : `已執行 ${r.executed} 句，共 ${total} ms`);
+    const active = failed ? r.results.indexOf(failed) : Math.max(0, r.results.findIndex((/** @type {any} */ x) => x.kind === 'query'));
+    const total = r.results.reduce((/** @type {number} */ n, /** @type {any} */ x) => n + x.ms, 0);
+    const foot = failed ? `第 ${r.results.length} / ${r.total} 句發生錯誤，後續指令未執行` : `已執行 ${r.executed} 句，共 ${total} ms`;
     ui.history = (await td.invoke('state')).history;
+    if (sid !== ui.activeSid) {
+      // 執行期間切到別的連線：結果留在原連線的工作區
+      const w = workspaces.get(sid);
+      if (w) Object.assign(w, { results: r.results, active, foot });
+      td.toast(`「${s.profile.name}」${failed ? '執行發生錯誤' : '執行完成'}`, failed ? 'error' : 'info');
+      return;
+    }
+    ui.results = r.results;
+    ui.active = active;
+    if (r.range && mode === 'current') editor.setSelectionRange(r.range.start, Math.min(r.range.end + 1, editor.value.length));
+    renderResults();
+    setFoot(foot);
   } catch (err) {
+    if (sid !== ui.activeSid) { td.toast(`「${s.profile.name}」無法執行：${msgOf(err)}`, 'error'); return; }
     showMessage('無法執行', msgOf(err), true);
     setFoot('');
   }
@@ -301,9 +482,13 @@ async function run(which) {
 
 $('#runBtn').onclick = () => run('current');
 $('#runAllBtn').onclick = () => run('all');
-$('#cancelBtn').onclick = () => td.invoke('cancel');
-$('#commitBtn').onclick = async () => { applyState(await td.invoke('commit')); setFoot('已提交（Commit）'); };
-$('#rollbackBtn').onclick = async () => { applyState(await td.invoke('rollback')); setFoot('已回滾（Rollback）'); };
+$('#cancelBtn').onclick = () => td.invoke('cancel', ui.activeSid);
+$('#commitBtn').onclick = async () => {
+  try { applyState(await td.invoke('commit', ui.activeSid)); setFoot('已提交（Commit）'); } catch (err) { td.toast(msgOf(err), 'error'); }
+};
+$('#rollbackBtn').onclick = async () => {
+  try { applyState(await td.invoke('rollback', ui.activeSid)); setFoot('已回滾（Rollback）'); } catch (err) { td.toast(msgOf(err), 'error'); }
+};
 autoCommit.onchange = async () => applyState(await td.invoke('setAutoCommit', autoCommit.checked));
 
 editor.addEventListener('keydown', (e) => {
@@ -311,12 +496,26 @@ editor.addEventListener('keydown', (e) => {
   else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); openSaveSnippet(); }
   else if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); editor.setRangeText('  ', editor.selectionStart, editor.selectionEnd, 'end'); }
 });
-editor.addEventListener('input', () => { try { localStorage.setItem('sql', editor.value); } catch { /* 忽略 */ } });
+editor.addEventListener('input', storeSql);
+
+// ⌘/Ctrl + 1~5：切換到第 N 條連線
+document.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || !/^[1-9]$/.test(e.key)) return;
+  const s = ui.state.sessions[Number(e.key) - 1];
+  if (!s) return;
+  e.preventDefault();
+  switchTo(s.id);
+});
 
 /* ───────── 結果 ───────── */
 
 /** @param {string} text */
 function setFoot(text) { $('#footMsg').textContent = text; }
+
+function showEmpty() {
+  $('#tabs').innerHTML = '';
+  $('#pane').innerHTML = `<div class="empty">${cur() ? '輸入 SQL 並按 ⌘/Ctrl + Enter 執行' : '連線後輸入 SQL 並按 ⌘/Ctrl + Enter 執行'}</div>`;
+}
 
 /** @param {string} title @param {string} body @param {boolean} [error] */
 function showMessage(title, body, error) {
@@ -382,33 +581,47 @@ document.querySelectorAll('#sideTabs button').forEach((b) => {
 });
 $('#toggleSide').onclick = () => document.body.classList.toggle('side-hidden');
 
+/** @param {string} value */
+function renderSchemaOptions(value) {
+  schemaSel.innerHTML = ui.schemas.map((s) => `<option value="${td.escape(s)}">${td.escape(s)}${s === ui.currentSchema ? '（目前）' : ''}</option>`).join('');
+  if (value) schemaSel.value = value;
+}
+
+// 側欄的非同步載入都以發出時的連線為準：回來時已切到別的連線就丟棄（切回來時會重新載入）
 async function loadSchemas() {
+  const sid = ui.activeSid;
+  if (!sid) return;
+  $('#objList').innerHTML = '<div class="sideEmpty">載入中…</div>';
   try {
-    const r = await td.invoke('listSchemas');
+    const r = await td.invoke('listSchemas', { sid });
+    if (sid !== ui.activeSid) return;
     ui.currentSchema = r.current;
-    schemaSel.innerHTML = r.schemas.map((/** @type {string} */ s) => `<option value="${td.escape(s)}">${td.escape(s)}${s === r.current ? '（目前）' : ''}</option>`).join('');
-    schemaSel.value = r.current;
+    ui.schemas = r.schemas;
+    renderSchemaOptions(r.current);
     await loadObjects();
   } catch (err) {
-    $('#objList').innerHTML = `<div class="sideEmpty err">${td.escape(msgOf(err))}</div>`;
+    if (sid === ui.activeSid) $('#objList').innerHTML = `<div class="sideEmpty err">${td.escape(msgOf(err))}</div>`;
   }
 }
 
 async function loadObjects() {
-  if (!ui.state.connected) return;
+  const sid = ui.activeSid;
+  if (!sid) return;
   $('#objList').innerHTML = '<div class="sideEmpty">載入中…</div>';
   try {
-    ui.objects = await td.invoke('listObjects', { owner: schemaSel.value });
+    const objects = await td.invoke('listObjects', { sid, owner: schemaSel.value });
+    if (sid !== ui.activeSid) return;
+    ui.objects = objects;
     renderObjects();
   } catch (err) {
-    $('#objList').innerHTML = `<div class="sideEmpty err">${td.escape(msgOf(err))}</div>`;
+    if (sid === ui.activeSid) $('#objList').innerHTML = `<div class="sideEmpty err">${td.escape(msgOf(err))}</div>`;
   }
 }
 
 function renderObjects() {
   const q = /** @type {HTMLInputElement} */ ($('#objFilter')).value.trim().toUpperCase();
   const list = ui.objects.filter((o) => !q || o.NAME.toUpperCase().includes(q) || (o.COMMENTS || '').toUpperCase().includes(q));
-  if (!ui.state.connected) { $('#objList').innerHTML = '<div class="sideEmpty">連線後顯示資料表</div>'; return; }
+  if (!cur()) { $('#objList').innerHTML = '<div class="sideEmpty">連線後顯示資料表</div>'; return; }
   $('#objList').innerHTML = list.length
     ? list.map((o) => `<div class="obj ${o.NAME === ui.selectedObject ? 'sel' : ''}" data-name="${td.escape(o.NAME)}" title="${td.escape(o.COMMENTS || '')}　雙擊查詢前 100 列">
         <span class="k ${o.TYPE === 'VIEW' ? 'V' : 'T'}">${o.TYPE === 'VIEW' ? 'V' : 'T'}</span>
@@ -441,10 +654,13 @@ function queryTop(name) {
 
 /** @param {string} name */
 async function showDescribe(name) {
+  const sid = ui.activeSid;
+  if (!sid) return;
   ui.selectedObject = name;
   renderObjects();
   try {
-    const cols = await td.invoke('describe', { owner: schemaSel.value, name });
+    const cols = await td.invoke('describe', { sid, owner: schemaSel.value, name });
+    if (sid !== ui.activeSid) return;
     const obj = ui.objects.find((o) => o.NAME === name);
     $('#tabs').innerHTML = `<button class="on">${td.escape(name)} 結構</button>`;
     $('#pane').innerHTML = `<div class="row" style="padding:8px 12px">
@@ -462,7 +678,7 @@ async function showDescribe(name) {
       editor.focus();
     };
   } catch (err) {
-    showMessage('無法讀取結構', msgOf(err), true);
+    if (sid === ui.activeSid) showMessage('無法讀取結構', msgOf(err), true);
   }
 }
 
@@ -589,5 +805,5 @@ $('#resizer').addEventListener('mousedown', (e) => {
 /* ───────── 啟動 ───────── */
 
 td.on('state', (s) => applyState(s));
-try { editor.value = localStorage.getItem('sql') || "-- 範例：\nSELECT SYSDATE, USER FROM DUAL;\n\n-- 參數：執行時會詢問 :prefix 的值\nSELECT table_name, num_rows FROM user_tables WHERE table_name LIKE :prefix || '%' ORDER BY table_name;\n"; } catch { /* 忽略 */ }
+try { editor.value = loadSql(null) ?? localStorage.getItem('sql') ?? "-- 範例：\nSELECT SYSDATE, USER FROM DUAL;\n\n-- 參數：執行時會詢問 :prefix 的值\nSELECT table_name, num_rows FROM user_tables WHERE table_name LIKE :prefix || '%' ORDER BY table_name;\n"; } catch { /* 忽略 */ }
 refresh().catch((err) => showMessage('載入失敗', msgOf(err), true));

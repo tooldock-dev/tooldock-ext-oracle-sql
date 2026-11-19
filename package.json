@@ -1,6 +1,6 @@
 {
   "name": "oracle-sql",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "連線 Oracle 資料庫並執行 SQL 指令，查詢結果以表格顯示",
   "main": "backend/index.js",
   "private": true,
@@ -14,10 +14,11 @@
   "tooldock": {
     "id": "oracle-sql",
     "displayName": "Oracle SQL 工具",
-    "description": "連線 Oracle 並執行 SQL：支援 :參數綁定、資料表瀏覽、記住密碼（鑰匙圈加密）、SQL 保存",
+    "description": "連線 Oracle 並執行 SQL：最多同時 5 條連線切換使用、:參數綁定、資料表瀏覽、記住密碼（鑰匙圈加密）、SQL 保存",
     "icon": "🛢",
     "engine": "^1.1.0",
     "activationEvents": [],
+    "keepAlive": true,
     "contributes": {
       "views": [
         {
@@ -34,7 +35,7 @@
         },
         {
           "id": "oracleSql.disconnect",
-          "title": "Oracle SQL：中斷連線"
+          "title": "Oracle SQL：中斷全部連線"
         }
       ],
       "configuration": {
