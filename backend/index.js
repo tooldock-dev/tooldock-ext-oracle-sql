@@ -27,6 +27,8 @@ oracledb.fetchAsString = [oracledb.CLOB, oracledb.NCLOB];
  */
 
 const MAX_SESSIONS = 5;
+/** @type {ReturnType<typeof import('./exchange').setup> | null} 資料交換（tooldock.sql 接收端） */
+let exchangeApi = null;
 /** @type {Map<string, Session>} 連線 id（= 連線設定 id）→ 連線 */
 const sessions = new Map();
 /** @type {Set<string>} 正在建立中的連線，計入上限，避免同時按多次超過 */
@@ -221,6 +223,7 @@ exports.activate = (ctx) => {
     secretsAvailable: await secretsAvailable(),
     history: ctx.storage.get('history', []),
     snippets: snippets(),
+    exchange: !!(/** @type {any} */ (ctx).exchange),
   }));
 
   ctx.ui.handle('saveProfile', (/** @type {Profile} */ p) => {
@@ -489,11 +492,32 @@ exports.activate = (ctx) => {
     return r.filePath;
   });
 
+  /* ───────── 資料交換：接收 tooldock.sql（ToolDock 1.4.0 以上） ───────── */
+
+  const exchange = require('./exchange').setup(ctx, {
+    profiles,
+    connectString,
+    savedPasswordIds,
+    savedPassword: async (id) => (ctx.secrets && savedPasswordIds().includes(id) ? ctx.secrets.get(secretKey(id)).catch(() => null) : null),
+  });
+  exchangeApi = exchange;
+
   ctx.subscriptions.push(
+    { dispose: () => { exchange.dispose(); exchangeApi = null; } },
     ctx.commands.register('oracleSql.open', () => ctx.window.openView('oracleSql.main')),
     ctx.commands.register('oracleSql.disconnect', () => disconnectAll()),
     ctx.settings.onDidChange(() => emit()),
   );
+};
+
+/**
+ * contributes.exchange.imports[].handler：其他工具分享的 tooldock.sql。
+ * 平台會先開啟 oracleSql.main 畫面，使用者在畫面上預覽、試跑、確認後才回傳。
+ * @param {import('tooldock-types').ExtensionContext} _ctx @param {any} pkg @param {any} info
+ */
+exports.importSql = (_ctx, pkg, info) => {
+  if (!exchangeApi) throw new Error('Oracle SQL 工具尚未啟用完成');
+  return exchangeApi.importSql(pkg, info);
 };
 
 /**

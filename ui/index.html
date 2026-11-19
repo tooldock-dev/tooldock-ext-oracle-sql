@@ -92,11 +92,51 @@
     #historyList { position: absolute; right: 0; top: 30px; width: 420px; max-height: 300px; overflow: auto; background: var(--bg-elevated); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
     #historyList div { padding: 6px 10px; font-family: var(--mono); font-size: 11.5px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: pre-wrap; max-height: 64px; overflow: hidden; }
     #historyList div:hover { background: var(--bg-hover); }
+
+    /* ── 資料交換：其他工具分享的 SQL ── */
+    #sideTabs .count { display: inline-block; min-width: 16px; padding: 0 4px; margin-left: 4px; border-radius: 8px; background: var(--accent); color: #fff; font-size: 10px; line-height: 16px; }
+    #sideTabs .count[hidden] { display: none; }
+    .imp { display: flex; gap: 6px; align-items: center; padding: 7px 10px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+    .imp:hover { background: var(--bg-hover); }
+    .imp.sel { background: var(--bg-active); color: var(--fg-strong); box-shadow: inset 2px 0 var(--accent); }
+    .imp .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .imp .s { font-size: 11px; white-space: nowrap; }
+    #importCol { overflow: auto; padding: 16px 24px 40px; min-width: 0; }
+    #importCol[hidden], #mainCol[hidden] { display: none; }
+    #importCol h1 { margin: 0 0 4px; font-size: 19px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .xbanner { padding: 8px 12px; border-radius: 6px; margin: 8px 0; font-size: 13px; line-height: 1.55; }
+    .xbanner.err { background: rgba(248, 81, 73, .12); color: var(--err); }
+    .xbanner.warn { background: rgba(210, 153, 34, .12); color: var(--warn); }
+    .xbanner.info { background: rgba(14, 122, 211, .12); color: var(--fg-strong); }
+    .xbanner.ok { background: rgba(63, 185, 80, .12); color: var(--ok); }
+    .xbanner ul { margin: 4px 0 0; padding-left: 18px; }
+    dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 10px 0; font-size: 13px; }
+    dl.kv dt { color: var(--fg-muted); }
+    dl.kv dd { margin: 0; word-break: break-all; }
+    .xblock { margin-top: 18px; }
+    .xblock > h3 { margin: 0 0 8px; font-size: 14px; }
+    .xform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .xform select { min-width: 260px; }
+    .stmt { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; background: var(--bg-elevated); }
+    .stmt .hd { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; font-size: 12.5px; }
+    .stmt .hd b { color: var(--fg-strong); }
+    .stmt pre { margin: 0; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; background: var(--bg-sunken); font-family: var(--mono); }
+    .stmt .bd { padding: 8px 12px; font-size: 12px; }
+    .stmt details summary { cursor: pointer; color: var(--fg-muted); }
+    .xtbl { max-height: 260px; overflow: auto; margin-top: 6px; border: 1px solid var(--border); border-radius: 6px; }
+    .xtbl table.grid td, .xtbl table.grid th { font-size: 12px; }
+    .xtbl td.null { color: var(--fg-faint); font-style: italic; }
+    table.params td input:not([type=checkbox]), table.params td select { width: 100%; }
+    table.params td { vertical-align: middle; font-size: 12.5px; }
+    .xactions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+    .xactions .spacer { flex: 1; }
+    .xres { margin-top: 8px; font-size: 12.5px; }
+    .muted-sm { font-size: 12px; color: var(--fg-muted); }
   </style>
 </head>
 <body>
   <aside id="side">
-    <div id="sideTabs"><button class="on" data-pane="objects">資料表</button><button data-pane="snippets">已存 SQL</button></div>
+    <div id="sideTabs"><button class="on" data-pane="objects">資料表</button><button data-pane="snippets">已存 SQL</button><button data-pane="imports" id="importsTab" title="其他工具分享的 SQL（tooldock.sql）">匯入<span class="count" id="importCount" hidden></span></button></div>
 
     <div class="sidePane" id="pane-objects">
       <div class="sideBar"><select id="schema" title="Schema"></select><button class="ghost" id="refreshObjects" title="重新整理">⟳</button></div>
@@ -113,7 +153,18 @@
       <div class="sideBar" style="padding-top:0"><input id="snipFilter" placeholder="搜尋已存的 SQL"></div>
       <div class="list" id="snipList"></div>
     </div>
+
+    <div class="sidePane" id="pane-imports" hidden>
+      <div class="sideBar">
+        <button class="ghost" id="openTdx" title="匯入 .tdx 交換檔">開啟 .tdx</button>
+        <button class="ghost" id="showAudit" title="執行、拒絕與取消的紀錄">稽核紀錄</button>
+      </div>
+      <div class="list" id="importList"></div>
+    </div>
   </aside>
+
+  <!-- 其他工具分享的 SQL：預覽、試跑、確認執行（取代主區顯示） -->
+  <section id="importCol" hidden></section>
 
   <section id="mainCol">
     <div class="bar">
@@ -204,5 +255,6 @@
 
   <script src="tooldock://sdk/ui-sdk.js"></script>
   <script src="app.js"></script>
+  <script src="exchange.js"></script>
 </body>
 </html>

@@ -575,8 +575,7 @@ document.querySelectorAll('#sideTabs button').forEach((b) => {
   b.addEventListener('click', () => {
     const pane = /** @type {HTMLElement} */ (b).dataset.pane;
     document.querySelectorAll('#sideTabs button').forEach((x) => x.classList.toggle('on', x === b));
-    $('#pane-objects').hidden = pane !== 'objects';
-    $('#pane-snippets').hidden = pane !== 'snippets';
+    document.querySelectorAll('.sidePane').forEach((p) => { /** @type {HTMLElement} */ (p).hidden = p.id !== `pane-${pane}`; });
   });
 });
 $('#toggleSide').onclick = () => document.body.classList.toggle('side-hidden');
