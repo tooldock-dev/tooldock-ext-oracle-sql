@@ -58,7 +58,20 @@
     @keyframes blink { 50% { opacity: .3; } }
     #connInfo { font-size: 12px; flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #editorWrap { position: relative; height: 38%; min-height: 110px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; }
-    #sql { flex: 1; border: 0; border-radius: 0; resize: none; padding: 10px 14px; font-size: 13px; line-height: 1.6; background: var(--bg); tab-size: 2; }
+    #sql { flex: 1; min-height: 0; overflow: hidden; }
+    /* SQL 語法顏色（編輯器：ui/vendor/sql-editor.js） */
+    :root {
+      --syn-keyword: #569cd6; --syn-type: #4ec9b0; --syn-func: #dcdcaa; --syn-string: #ce9178; --syn-ident: #9cdcfe;
+      --syn-number: #b5cea8; --syn-comment: #6a9955; --syn-bind: #c586c0; --syn-operator: #d4d4d4;
+      --syn-active-line: rgba(255, 255, 255, .04); --syn-selection: rgba(38, 79, 120, .85); --syn-match: rgba(255, 255, 255, .1);
+    }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]) {
+        --syn-keyword: #0000ff; --syn-type: #267f99; --syn-func: #795e26; --syn-string: #a31515; --syn-ident: #001080;
+        --syn-number: #098658; --syn-comment: #008000; --syn-bind: #af00db; --syn-operator: #3b3b3b;
+        --syn-active-line: rgba(0, 0, 0, .035); --syn-selection: #add6ff; --syn-match: rgba(0, 0, 0, .08);
+      }
+    }
     #resizer { height: 5px; cursor: row-resize; }
     #resizer:hover { background: var(--accent); }
     #results { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -190,7 +203,7 @@
       <span id="history"><button class="ghost" id="historyBtn">歷史紀錄 ▾</button><div id="historyList" hidden></div></span>
     </div>
 
-    <div id="editorWrap"><textarea id="sql" spellcheck="false" placeholder="SELECT * FROM user_tables;"></textarea></div>
+    <div id="editorWrap"><div id="sql"></div></div>
     <div id="resizer"></div>
 
     <div id="results">
@@ -254,6 +267,7 @@
   </dialog>
 
   <script src="tooldock://sdk/ui-sdk.js"></script>
+  <script src="vendor/sql-editor.js"></script>
   <script src="app.js"></script>
   <script src="exchange.js"></script>
 </body>

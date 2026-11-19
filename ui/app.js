@@ -5,8 +5,22 @@ const td = window.tooldock;
 /** @template {HTMLElement} [T=HTMLElement] @param {string} sel @returns {T} */
 const $ = (sel) => /** @type {T} */ (document.querySelector(sel));
 
-/** @type {HTMLTextAreaElement} */
-const editor = $('#sql');
+/**
+ * SQL 編輯器（CodeMirror 6，見 src-ui/sql-editor.js）：介面與 <textarea> 相同
+ * @typedef {{ value: string, readonly selectionStart: number, readonly selectionEnd: number,
+ *   setSelectionRange(start: number, end: number): void,
+ *   setRangeText(text: string, start?: number, end?: number, selectMode?: 'end' | 'preserve'): void,
+ *   focus(): void, addEventListener(type: string, fn: (e: Event) => void): void, dispatchEvent(e: Event): boolean }} SqlEditorApi
+ */
+/** @type {SqlEditorApi} */
+const editor = /** @type {any} */ (window).SqlEditor.create($('#sql'), {
+  placeholder: 'SELECT * FROM user_tables;',
+  keys: {
+    'Mod-Enter': () => run('current'),
+    'Shift-Mod-Enter': () => run('all'),
+    'Mod-s': () => openSaveSnippet(),
+  },
+});
 /** @type {HTMLSelectElement} */
 const profileSel = $('#profile');
 /** @type {HTMLInputElement} */
@@ -491,11 +505,7 @@ $('#rollbackBtn').onclick = async () => {
 };
 autoCommit.onchange = async () => applyState(await td.invoke('setAutoCommit', autoCommit.checked));
 
-editor.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(e.shiftKey ? 'all' : 'current'); }
-  else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); openSaveSnippet(); }
-  else if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); editor.setRangeText('  ', editor.selectionStart, editor.selectionEnd, 'end'); }
-});
+// ⌘/Ctrl + Enter、⌘/Ctrl + Shift + Enter、⌘/Ctrl + S、Tab 由編輯器處理（建立時的 keys）
 editor.addEventListener('input', storeSql);
 
 // ⌘/Ctrl + 1~5：切換到第 N 條連線
