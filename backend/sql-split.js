@@ -84,4 +84,38 @@ function statementAt(text, cursor) {
   return before.length ? before[before.length - 1] : list[0];
 }
 
-module.exports = { splitSql, statementAt };
+/**
+ * 找出指令中的綁定變數（:name 或 :1），依出現順序、不分大小寫去重複。
+ * 會略過字串、註解、雙引號識別字，以及 PL/SQL 的指派運算子 :=；
+ * CREATE TRIGGER 內的 :NEW / :OLD 是觸發程序的參照，不視為綁定變數。
+ */
+function bindNames(sql) {
+  const text = String(sql);
+  if (/^\s*CREATE\s+(OR\s+REPLACE\s+)?(EDITIONABLE\s+|NONEDITIONABLE\s+)?TRIGGER\b/i.test(text)) return [];
+  const names = [];
+  const seen = new Set();
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const n = text[i + 1];
+    if (c === "'") { // 字串（'' 為跳脫）
+      for (i++; i < text.length; i++) {
+        if (text[i] === "'") { if (text[i + 1] === "'") i++; else break; }
+      }
+      continue;
+    }
+    if (c === '"') { const end = text.indexOf('"', i + 1); i = end < 0 ? text.length : end; continue; }
+    if (c === '-' && n === '-') { const end = text.indexOf('\n', i); i = end < 0 ? text.length : end; continue; }
+    if (c === '/' && n === '*') { const end = text.indexOf('*/', i + 2); i = end < 0 ? text.length : end + 1; continue; }
+    if (c === ':' && text[i - 1] !== ':' && n !== '=') {
+      const m = text.slice(i + 1).match(/^([A-Za-z][A-Za-z0-9_$#]*|\d+)/);
+      if (m) {
+        const key = m[1].toUpperCase();
+        if (!seen.has(key)) { seen.add(key); names.push(m[1]); }
+        i += m[1].length;
+      }
+    }
+  }
+  return names;
+}
+
+module.exports = { splitSql, statementAt, bindNames };

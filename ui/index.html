@@ -6,15 +6,47 @@
   <link rel="stylesheet" href="tooldock://sdk/ui-base.css">
   <style>
     html, body { height: 100%; }
-    body { display: flex; flex-direction: column; overflow: hidden; }
-    .bar { display: flex; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    body { display: grid; grid-template-columns: var(--side, 260px) minmax(0, 1fr); overflow: hidden; }
+    body.side-hidden { --side: 0px; }
+    body.side-hidden #side { display: none; }
+
+    /* ── 側欄 ── */
+    #side { border-right: 1px solid var(--border); background: var(--bg-elevated); display: flex; flex-direction: column; min-height: 0; }
+    #sideTabs { display: flex; border-bottom: 1px solid var(--border); }
+    #sideTabs button { flex: 1; border-radius: 0; background: transparent; color: var(--fg-muted); border-bottom: 2px solid transparent; min-height: 32px; }
+    #sideTabs button.on { color: var(--fg-strong); border-bottom-color: var(--accent); }
+    .sidePane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .sidePane[hidden] { display: none; }
+    .sideBar { display: flex; gap: 4px; padding: 8px; align-items: center; }
+    .sideBar select, .sideBar input { flex: 1; min-width: 0; min-height: 24px; font-size: 12px; }
+    .sideBar button { min-height: 24px; padding: 0 8px; font-size: 12px; }
+    .list { flex: 1; overflow: auto; font-size: 12.5px; }
+    .obj { display: flex; gap: 6px; align-items: center; padding: 3px 10px; cursor: pointer; white-space: nowrap; }
+    .obj:hover { background: var(--bg-hover); }
+    .obj.sel { background: var(--bg-active); color: var(--fg-strong); }
+    .obj .k { font-size: 10px; font-weight: 600; width: 16px; text-align: center; border-radius: 3px; flex: none; }
+    .obj .k.T { color: var(--info); } .obj .k.V { color: var(--warn); }
+    .obj .n { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+    .obj .c { color: var(--fg-faint); font-size: 11px; }
+    .snip { padding: 6px 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
+    .snip:hover { background: var(--bg-hover); }
+    .snip .t { display: flex; gap: 6px; align-items: center; }
+    .snip .t b { flex: 1; color: var(--fg-strong); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .snip .t button { min-height: 18px; padding: 0 5px; font-size: 11px; visibility: hidden; }
+    .snip:hover .t button { visibility: visible; }
+    .snip pre { margin: 3px 0 0; font-family: var(--mono); font-size: 11px; color: var(--fg-muted); white-space: pre-wrap; max-height: 34px; overflow: hidden; }
+    .sideEmpty { padding: 18px 12px; color: var(--fg-faint); font-size: 12px; text-align: center; }
+
+    /* ── 主區 ── */
+    #mainCol { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .bar { display: flex; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
     .bar button { min-height: 24px; padding: 2px 10px; }
-    .bar select { min-width: 220px; }
+    .bar select { min-width: 200px; }
     .bar .spacer { flex: 1; }
     #connInfo { font-size: 12px; flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    #editorWrap { position: relative; height: 38%; min-height: 120px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; }
+    #editorWrap { position: relative; height: 38%; min-height: 110px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; }
     #sql { flex: 1; border: 0; border-radius: 0; resize: none; padding: 10px 14px; font-size: 13px; line-height: 1.6; background: var(--bg); tab-size: 2; }
-    #resizer { height: 5px; cursor: row-resize; background: transparent; }
+    #resizer { height: 5px; cursor: row-resize; }
     #resizer:hover { background: var(--accent); }
     #results { flex: 1; display: flex; flex-direction: column; min-height: 0; }
     #tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
@@ -28,14 +60,21 @@
     #pane table.grid td.rn { color: var(--fg-faint); text-align: right; }
     .msg { padding: 14px 16px; font-size: 13px; }
     .msg pre { background: var(--bg-sunken); border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; white-space: pre-wrap; margin: 8px 0 0; }
+    .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .chip { font-family: var(--mono); font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); }
     #foot { display: flex; gap: 12px; padding: 4px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--fg-muted); }
-    dialog { background: var(--bg-elevated); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 8px; padding: 18px 20px; width: min(460px, 92vw); }
+
+    dialog { background: var(--bg-elevated); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 8px; padding: 18px 20px; width: min(480px, 92vw); }
     dialog::backdrop { background: rgba(0, 0, 0, .45); }
     .f { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
     .f input { width: 100%; }
     .two { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
     .hint { font-size: 11px; color: var(--fg-faint); }
+    .opt { display: flex; align-items: center; gap: 6px; color: var(--fg); margin: 4px 0 10px; }
     kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 3px; }
+    #bindRows { display: grid; grid-template-columns: auto 90px 1fr; gap: 8px 10px; align-items: center; margin: 10px 0 14px; }
+    #bindRows .bn { font-family: var(--mono); color: var(--fg-strong); }
+    #bindRows select, #bindRows input { min-height: 26px; }
     #history { position: relative; z-index: 2; }
     #historyList { position: absolute; right: 0; top: 30px; width: 420px; max-height: 300px; overflow: auto; background: var(--bg-elevated); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
     #historyList div { padding: 6px 10px; font-family: var(--mono); font-size: 11.5px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: pre-wrap; max-height: 64px; overflow: hidden; }
@@ -43,38 +82,59 @@
   </style>
 </head>
 <body>
-  <div class="bar">
-    <select id="profile"></select>
-    <button class="secondary" id="editProfile" title="編輯連線設定">✎</button>
-    <button class="secondary" id="newProfile">＋ 新增連線</button>
-    <button id="connectBtn">連線</button>
-    <span id="connInfo" class="muted"></span>
-    <span class="spacer"></span>
-    <label class="row" style="gap:4px"><input type="checkbox" id="autoCommit">自動提交</label>
-    <button class="secondary" id="commitBtn" disabled>Commit</button>
-    <button class="secondary" id="rollbackBtn" disabled>Rollback</button>
-  </div>
+  <aside id="side">
+    <div id="sideTabs"><button class="on" data-pane="objects">資料表</button><button data-pane="snippets">已存 SQL</button></div>
 
-  <div class="bar">
-    <button id="runBtn" disabled title="執行游標所在的指令或選取範圍（⌘/Ctrl + Enter）">▶ 執行</button>
-    <button class="secondary" id="runAllBtn" disabled title="依序執行全部指令（⌘/Ctrl + Shift + Enter）">▶▶ 執行全部</button>
-    <button class="danger" id="cancelBtn" disabled>■ 停止</button>
-    <span class="faint" style="font-size:11px"><kbd>⌘/Ctrl</kbd>+<kbd>Enter</kbd> 執行游標所在指令　SQL 以 <code>;</code> 結尾，PL/SQL 區塊以單獨一行的 <code>/</code> 結尾</span>
-    <span class="spacer"></span>
-    <span id="history"><button class="ghost" id="historyBtn">歷史紀錄 ▾</button><div id="historyList" hidden></div></span>
-  </div>
+    <div class="sidePane" id="pane-objects">
+      <div class="sideBar"><select id="schema" title="Schema"></select><button class="ghost" id="refreshObjects" title="重新整理">⟳</button></div>
+      <div class="sideBar" style="padding-top:0"><input id="objFilter" placeholder="篩選資料表 / 檢視表"></div>
+      <div class="list" id="objList"><div class="sideEmpty">連線後顯示資料表</div></div>
+    </div>
 
-  <div id="editorWrap">
-    <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM user_tables;"></textarea>
-  </div>
-  <div id="resizer"></div>
+    <div class="sidePane" id="pane-snippets" hidden>
+      <div class="sideBar">
+        <button id="saveSnippet" title="把編輯器內容存成一則 SQL">＋ 儲存目前 SQL</button>
+        <button class="ghost" id="openFile" title="開啟 .sql 檔">開啟檔案</button>
+        <button class="ghost" id="saveFile" title="另存為 .sql 檔">另存</button>
+      </div>
+      <div class="sideBar" style="padding-top:0"><input id="snipFilter" placeholder="搜尋已存的 SQL"></div>
+      <div class="list" id="snipList"></div>
+    </div>
+  </aside>
 
-  <div id="results">
-    <div id="tabs"></div>
-    <div id="pane"><div class="empty">連線後輸入 SQL 並按 ⌘/Ctrl + Enter 執行</div></div>
-  </div>
-  <div id="foot"><span id="footMsg"></span><span class="spacer" style="flex:1"></span><span id="footRight"></span></div>
+  <section id="mainCol">
+    <div class="bar">
+      <button class="ghost" id="toggleSide" title="顯示 / 隱藏側欄">☰</button>
+      <select id="profile"></select>
+      <button class="secondary" id="editProfile" title="編輯連線設定">✎</button>
+      <button class="secondary" id="newProfile">＋ 新增連線</button>
+      <button id="connectBtn">連線</button>
+      <span id="connInfo" class="muted"></span>
+      <label class="row" style="gap:4px"><input type="checkbox" id="autoCommit">自動提交</label>
+      <button class="secondary" id="commitBtn" disabled>Commit</button>
+      <button class="secondary" id="rollbackBtn" disabled>Rollback</button>
+    </div>
 
+    <div class="bar">
+      <button id="runBtn" disabled title="執行游標所在的指令或選取範圍（⌘/Ctrl + Enter）">▶ 執行</button>
+      <button class="secondary" id="runAllBtn" disabled title="依序執行全部指令（⌘/Ctrl + Shift + Enter）">▶▶ 執行全部</button>
+      <button class="danger" id="cancelBtn" disabled>■ 停止</button>
+      <span class="faint" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><kbd>⌘/Ctrl</kbd>+<kbd>Enter</kbd> 執行　<code>:名稱</code> 為參數　<kbd>⌘/Ctrl</kbd>+<kbd>S</kbd> 儲存 SQL</span>
+      <span class="spacer"></span>
+      <span id="history"><button class="ghost" id="historyBtn">歷史紀錄 ▾</button><div id="historyList" hidden></div></span>
+    </div>
+
+    <div id="editorWrap"><textarea id="sql" spellcheck="false" placeholder="SELECT * FROM user_tables;"></textarea></div>
+    <div id="resizer"></div>
+
+    <div id="results">
+      <div id="tabs"></div>
+      <div id="pane"><div class="empty">連線後輸入 SQL 並按 ⌘/Ctrl + Enter 執行</div></div>
+    </div>
+    <div id="foot"><span id="footMsg"></span><span style="flex:1"></span><span id="footRight"></span></div>
+  </section>
+
+  <!-- 連線設定 -->
   <dialog id="dlg">
     <form id="form">
       <h2 id="dlgTitle">連線設定</h2>
@@ -86,7 +146,8 @@
       </div>
       <div class="f"><label>服務名稱（Service Name）</label><input name="serviceName" placeholder="ORCLPDB1"></div>
       <div class="f"><label>使用者</label><input name="user" autocomplete="off"></div>
-      <div class="f"><label>連線字串（選填，會取代上面的主機 / 連接埠 / 服務名稱）</label><input name="connectString" placeholder="host:port/service 或完整的 (DESCRIPTION=...)"><span class="hint">使用 Thin 模式，不需安裝 Oracle Client。密碼不會儲存，每次連線時輸入。</span></div>
+      <div class="f"><label>連線字串（選填，會取代上面的主機 / 連接埠 / 服務名稱）</label><input name="connectString" placeholder="host:port/service 或完整的 (DESCRIPTION=...)"><span class="hint">使用 Thin 模式，不需安裝 Oracle Client。</span></div>
+      <div class="row" id="savedPwRow" hidden style="margin-bottom:10px"><span class="badge ok">已記住密碼</span><button type="button" class="ghost" id="forgetPw">清除記住的密碼</button></div>
       <div class="row" style="justify-content:space-between;margin-top:6px">
         <button type="button" class="danger" id="removeProfile">刪除</button>
         <span class="row"><button type="button" class="secondary" id="cancelDlg">取消</button><button type="submit">儲存</button></span>
@@ -94,11 +155,35 @@
     </form>
   </dialog>
 
+  <!-- 密碼 -->
   <dialog id="pwDlg">
     <form id="pwForm">
       <h2>連線到 <span id="pwTarget"></span></h2>
+      <div class="warn" id="pwReason" hidden style="font-size:12px;margin-bottom:8px"></div>
       <div class="f"><label>密碼</label><input name="password" type="password" autocomplete="off" required></div>
+      <label class="opt" id="rememberRow"><input type="checkbox" name="remember">記住密碼<span class="hint">（以作業系統鑰匙圈加密保存）</span></label>
+      <div class="hint" id="rememberNA" hidden style="margin-bottom:10px">目前的 ToolDock 版本不支援安全儲存，密碼不會被記住（需要 ToolDock 1.2.0 以上）。</div>
       <div class="row" style="justify-content:flex-end"><button type="button" class="secondary" id="pwCancel">取消</button><button type="submit">連線</button></div>
+    </form>
+  </dialog>
+
+  <!-- 參數 -->
+  <dialog id="bindDlg">
+    <form id="bindForm">
+      <h2>輸入參數</h2>
+      <div class="hint">SQL 中的 <code>:名稱</code> 會以下列值綁定（不是字串替換，可避免 SQL Injection）。</div>
+      <div id="bindRows"></div>
+      <div class="row" style="justify-content:flex-end"><button type="button" class="secondary" id="bindCancel">取消</button><button type="submit">執行</button></div>
+    </form>
+  </dialog>
+
+  <!-- 儲存 SQL -->
+  <dialog id="snipDlg">
+    <form id="snipForm">
+      <h2>儲存 SQL</h2>
+      <div class="f"><label>名稱</label><input name="name" required placeholder="例如：每月業績彙總"></div>
+      <div class="hint" style="margin-bottom:10px">同名的 SQL 會被覆寫。</div>
+      <div class="row" style="justify-content:flex-end"><button type="button" class="secondary" id="snipCancel">取消</button><button type="submit">儲存</button></div>
     </form>
   </dialog>
 
