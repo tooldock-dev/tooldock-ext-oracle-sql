@@ -15,6 +15,7 @@ import { syntaxHighlighting, syntaxTree, HighlightStyle, bracketMatching, indent
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import { sql, SQLDialect, PLSQL } from '@codemirror/lang-sql';
 import { tags as t } from '@lezer/highlight';
+import { formatSql } from './sql-format.mjs';
 
 /** 常用的 Oracle 內建函式（以「內建」顏色顯示） */
 const ORACLE_FUNCTIONS = [
@@ -234,6 +235,28 @@ export function create(parent, options = {}) {
       });
     },
     focus() { view.focus(); },
+    /**
+     * 排版選取範圍；沒有選取時排版全部（一次復原即可還原）
+     * @returns {ReturnType<typeof formatSql> & { changed: boolean, selection: boolean }}
+     */
+    format() {
+      const { from, to, head } = view.state.selection.main;
+      const selection = from !== to;
+      const start = selection ? from : 0;
+      const end = selection ? to : view.state.doc.length;
+      const original = view.state.sliceDoc(start, end);
+      const r = formatSql(original);
+      const changed = r.text !== original;
+      if (changed) {
+        view.dispatch({
+          changes: { from: start, to: end, insert: r.text },
+          selection: selection ? { anchor: start, head: start + r.text.length } : { anchor: Math.min(head, r.text.length) },
+          scrollIntoView: true,
+          userEvent: 'input.format',
+        });
+      }
+      return { ...r, changed, selection };
+    },
     /** @param {string} type @param {(e: Event) => void} fn */
     addEventListener(type, fn) {
       if (!listeners.has(type)) listeners.set(type, new Set());

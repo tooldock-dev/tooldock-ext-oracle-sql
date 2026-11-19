@@ -33,6 +33,15 @@ ToolDock 擴充：連線 Oracle 資料庫並執行 SQL 指令，查詢結果以�
 - **SQL 保存**：
   - 用 `⌘/Ctrl + S` 或「儲存目前 SQL」把編輯器內容存成一則有名稱的 SQL，可以搜尋、載入、刪除；同名會覆寫。
   - 可以開啟 `.sql` 檔，或另存為 `.sql` 檔。
+- **編輯器**：
+  - 語法高亮：關鍵字、資料型別、常用內建函式、字串（含 `q'[...]'`）、雙引號識別字、數字、註解、`:參數` 各有顏色，跟隨亮色／暗色主題。
+  - 行號、目前行標示、括號配對；`⌘/Ctrl + F` 尋找與取代。
+  - `Tab` 插入兩個空白，選取多行時整段縮排；`Shift + Tab` 減少縮排。
+- **排版**：
+  - 按「排版」或 `Shift + Alt + F`：有選取時只排版選取範圍，沒有選取時排版全部。按 `⌘/Ctrl + Z` 可以一次復原。
+  - 一句一句排版，關鍵字、型別、函式轉成大寫，名稱維持原樣；`:參數`、字串、註解不會被改動。
+  - PL/SQL 區塊（`BEGIN`、`DECLARE`、`CREATE PROCEDURE`…）和單獨一行的 `/` 原樣保留，不排版。
+  - 無法解析的指令會保持原樣，並在狀態列提示。
 - **執行 SQL**：
   - `⌘/Ctrl + Enter` 執行游標所在的那一句，或目前選取的範圍。
   - `⌘/Ctrl + Shift + Enter` 依序執行全部指令，遇到錯誤就停止。
@@ -122,10 +131,14 @@ npm run dev      # 以開發模式啟動 ToolDock
 npm run debug    # 同上，並開啟後端偵錯埠 9229
 npm run pack     # 打包成 dist/*.tbx
 npm test         # 單元測試與接收端往返測試（不需要資料庫的部分）
+npm run build:editor  # 修改 src-ui/ 或升級 @codemirror/*、sql-formatter 後，重新產生 ui/vendor/sql-editor.js
 ```
+
+編輯器（CodeMirror 6）和排版（sql-formatter）的原始碼在 `src-ui/`，用 esbuild 打包成 `ui/vendor/sql-editor.js`。打包結果有提交到 repo，打包 `.tbx` 時不需要先建置；`src-ui/` 和 `scripts/` 不會放進 `.tbx`。
 
 | 測試檔 | 內容 |
 |---|---|
+| `test/sql-format.test.js` | SQL 排版：綁定變數、註解、PL/SQL 區塊與 `/` 保留，無法解析時保持原樣 |
 | `test/sql-exchange.test.js` | `tooldock.sql` 的解析、分類、型別轉換 |
 | `test/exchange.test.js` | 接收端往返：用假的 `ctx` 送交換包給 `backend/exchange.js`，檢查產生端拿到的 `ImportResult`。<br>不需要資料庫：拒絕、取消、擴充停止、不允許的語句、未試跑、缺密碼。<br>需要資料庫：執行成功的結果、從檔案匯入時不回傳結果、分享查詢結果（`tooldock.table`）、執行失敗、重複匯入 |
 | `test/oracle.test.js` | 需要資料庫：交易、試跑、`expect`、`maxRows` 與型別轉換 |

@@ -10,7 +10,8 @@ const $ = (sel) => /** @type {T} */ (document.querySelector(sel));
  * @typedef {{ value: string, readonly selectionStart: number, readonly selectionEnd: number,
  *   setSelectionRange(start: number, end: number): void,
  *   setRangeText(text: string, start?: number, end?: number, selectMode?: 'end' | 'preserve'): void,
- *   focus(): void, addEventListener(type: string, fn: (e: Event) => void): void, dispatchEvent(e: Event): boolean }} SqlEditorApi
+ *   focus(): void, addEventListener(type: string, fn: (e: Event) => void): void, dispatchEvent(e: Event): boolean,
+ *   format(): { changed: boolean, selection: boolean, formatted: number, skippedPlsql: number, failed: { sql: string, error: string }[] } }} SqlEditorApi
  */
 /** @type {SqlEditorApi} */
 const editor = /** @type {any} */ (window).SqlEditor.create($('#sql'), {
@@ -19,6 +20,7 @@ const editor = /** @type {any} */ (window).SqlEditor.create($('#sql'), {
     'Mod-Enter': () => run('current'),
     'Shift-Mod-Enter': () => run('all'),
     'Mod-s': () => openSaveSnippet(),
+    'Shift-Alt-f': () => formatEditor(),
   },
 });
 /** @type {HTMLSelectElement} */
@@ -505,7 +507,21 @@ $('#rollbackBtn').onclick = async () => {
 };
 autoCommit.onchange = async () => applyState(await td.invoke('setAutoCommit', autoCommit.checked));
 
-// ⌘/Ctrl + Enter、⌘/Ctrl + Shift + Enter、⌘/Ctrl + S、Tab 由編輯器處理（建立時的 keys）
+// ⌘/Ctrl + Enter、⌘/Ctrl + Shift + Enter、⌘/Ctrl + S、Shift + Alt + F、Tab 由編輯器處理（建立時的 keys）
+
+/** 排版選取範圍（沒有選取時排版全部）；PL/SQL 區塊與無法解析的指令保持原樣 */
+function formatEditor() {
+  const r = editor.format();
+  editor.focus();
+  const scope = r.selection ? '選取範圍' : '';
+  const notes = [];
+  if (r.skippedPlsql) notes.push(`略過 ${r.skippedPlsql} 個 PL/SQL 區塊`);
+  if (r.failed.length) notes.push(`${r.failed.length} 句無法解析，保持原樣`);
+  if (!r.formatted) setFoot(`${scope}沒有可排版的 SQL${notes.length ? `（${notes.join('，')}）` : ''}`);
+  else setFoot(`已排版${scope} ${r.formatted} 句${r.changed ? '' : '（已是排版後的格式）'}${notes.length ? `，${notes.join('，')}` : ''}　⌘/Ctrl + Z 可復原`);
+  if (r.failed.length) td.toast(`${r.failed.length} 句 SQL 無法解析，未排版：${r.failed[0].error.split('\n')[0]}`, 'warn');
+}
+$('#formatBtn').onclick = formatEditor;
 editor.addEventListener('input', storeSql);
 
 // ⌘/Ctrl + 1~5：切換到第 N 條連線
