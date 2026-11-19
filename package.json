@@ -1,0 +1,78 @@
+{
+  "name": "oracle-sql",
+  "version": "1.0.0",
+  "description": "連線 Oracle 資料庫並執行 SQL 指令，查詢結果以表格顯示",
+  "main": "backend/index.js",
+  "private": true,
+  "scripts": {
+    "dev": "tooldock-ext dev",
+    "debug": "tooldock-ext dev --inspect",
+    "validate": "tooldock-ext validate",
+    "pack": "tooldock-ext pack",
+    "install-local": "tooldock-ext install"
+  },
+  "tooldock": {
+    "id": "oracle-sql",
+    "displayName": "Oracle SQL 工具",
+    "description": "連線 Oracle 資料庫並執行 SQL 指令，查詢結果以表格顯示",
+    "icon": "🛢",
+    "engine": "^1.1.0",
+    "activationEvents": [],
+    "contributes": {
+      "views": [
+        {
+          "id": "oracleSql.main",
+          "title": "Oracle SQL",
+          "icon": "🛢",
+          "entry": "ui/index.html"
+        }
+      ],
+      "commands": [
+        {
+          "id": "oracleSql.open",
+          "title": "Oracle SQL：開啟"
+        },
+        {
+          "id": "oracleSql.disconnect",
+          "title": "Oracle SQL：中斷連線"
+        }
+      ],
+      "configuration": {
+        "oracleSql.maxRows": {
+          "type": "number",
+          "default": 500,
+          "title": "最多顯示列數",
+          "description": "查詢結果最多取回的列數，超過會標示並截斷"
+        },
+        "oracleSql.callTimeoutSeconds": {
+          "type": "number",
+          "default": 60,
+          "title": "執行逾時（秒）",
+          "description": "單一指令超過此時間會被中止"
+        },
+        "oracleSql.autoCommit": {
+          "type": "boolean",
+          "default": false,
+          "title": "自動提交",
+          "description": "關閉時，INSERT / UPDATE / DELETE 需手動按 Commit"
+        }
+      },
+      "lifecycle": {
+        "app:before-quit": "onBeforeQuit"
+      }
+    }
+  },
+  "dependencies": {
+    "oracledb": "^26.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tooldock-cli": "^1.1.0",
+    "tooldock-types": "^1.0.0"
+  },
+  "keywords": [
+    "tooldock",
+    "oracle",
+    "sql"
+  ]
+}

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>Oracle SQL 工具</title>
+  <link rel="stylesheet" href="tooldock://sdk/ui-base.css">
+  <style>
+    html, body { height: 100%; }
+    body { display: flex; flex-direction: column; overflow: hidden; }
+    .bar { display: flex; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .bar button { min-height: 24px; padding: 2px 10px; }
+    .bar select { min-width: 220px; }
+    .bar .spacer { flex: 1; }
+    #connInfo { font-size: 12px; flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #editorWrap { position: relative; height: 38%; min-height: 120px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; }
+    #sql { flex: 1; border: 0; border-radius: 0; resize: none; padding: 10px 14px; font-size: 13px; line-height: 1.6; background: var(--bg); tab-size: 2; }
+    #resizer { height: 5px; cursor: row-resize; background: transparent; }
+    #resizer:hover { background: var(--accent); }
+    #results { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    #tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+    #tabs button { background: transparent; color: var(--fg-muted); border: 1px solid transparent; border-bottom: 0; border-radius: 4px 4px 0 0; min-height: 26px; }
+    #tabs button.on { background: var(--bg-elevated); color: var(--fg-strong); border-color: var(--border); }
+    #tabs button.err { color: var(--err); }
+    #pane { flex: 1; overflow: auto; }
+    #pane table.grid td { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+    #pane table.grid td.null { color: var(--fg-faint); font-style: italic; }
+    #pane table.grid th .t { font-weight: normal; color: var(--fg-faint); font-size: 10px; margin-left: 4px; }
+    #pane table.grid td.rn { color: var(--fg-faint); text-align: right; }
+    .msg { padding: 14px 16px; font-size: 13px; }
+    .msg pre { background: var(--bg-sunken); border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; white-space: pre-wrap; margin: 8px 0 0; }
+    #foot { display: flex; gap: 12px; padding: 4px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--fg-muted); }
+    dialog { background: var(--bg-elevated); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 8px; padding: 18px 20px; width: min(460px, 92vw); }
+    dialog::backdrop { background: rgba(0, 0, 0, .45); }
+    .f { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+    .f input { width: 100%; }
+    .two { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
+    .hint { font-size: 11px; color: var(--fg-faint); }
+    kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 3px; }
+    #history { position: relative; z-index: 2; }
+    #historyList { position: absolute; right: 0; top: 30px; width: 420px; max-height: 300px; overflow: auto; background: var(--bg-elevated); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+    #historyList div { padding: 6px 10px; font-family: var(--mono); font-size: 11.5px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: pre-wrap; max-height: 64px; overflow: hidden; }
+    #historyList div:hover { background: var(--bg-hover); }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <select id="profile"></select>
+    <button class="secondary" id="editProfile" title="編輯連線設定">✎</button>
+    <button class="secondary" id="newProfile">＋ 新增連線</button>
+    <button id="connectBtn">連線</button>
+    <span id="connInfo" class="muted"></span>
+    <span class="spacer"></span>
+    <label class="row" style="gap:4px"><input type="checkbox" id="autoCommit">自動提交</label>
+    <button class="secondary" id="commitBtn" disabled>Commit</button>
+    <button class="secondary" id="rollbackBtn" disabled>Rollback</button>
+  </div>
+
+  <div class="bar">
+    <button id="runBtn" disabled title="執行游標所在的指令或選取範圍（⌘/Ctrl + Enter）">▶ 執行</button>
+    <button class="secondary" id="runAllBtn" disabled title="依序執行全部指令（⌘/Ctrl + Shift + Enter）">▶▶ 執行全部</button>
+    <button class="danger" id="cancelBtn" disabled>■ 停止</button>
+    <span class="faint" style="font-size:11px"><kbd>⌘/Ctrl</kbd>+<kbd>Enter</kbd> 執行游標所在指令　SQL 以 <code>;</code> 結尾，PL/SQL 區塊以單獨一行的 <code>/</code> 結尾</span>
+    <span class="spacer"></span>
+    <span id="history"><button class="ghost" id="historyBtn">歷史紀錄 ▾</button><div id="historyList" hidden></div></span>
+  </div>
+
+  <div id="editorWrap">
+    <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM user_tables;"></textarea>
+  </div>
+  <div id="resizer"></div>
+
+  <div id="results">
+    <div id="tabs"></div>
+    <div id="pane"><div class="empty">連線後輸入 SQL 並按 ⌘/Ctrl + Enter 執行</div></div>
+  </div>
+  <div id="foot"><span id="footMsg"></span><span class="spacer" style="flex:1"></span><span id="footRight"></span></div>
+
+  <dialog id="dlg">
+    <form id="form">
+      <h2 id="dlgTitle">連線設定</h2>
+      <input type="hidden" name="profileId">
+      <div class="f"><label>名稱</label><input name="name" placeholder="例如：正式環境 HR"></div>
+      <div class="two">
+        <div class="f"><label>主機</label><input name="host" placeholder="db.example.com"></div>
+        <div class="f"><label>連接埠</label><input name="port" type="number" value="1521"></div>
+      </div>
+      <div class="f"><label>服務名稱（Service Name）</label><input name="serviceName" placeholder="ORCLPDB1"></div>
+      <div class="f"><label>使用者</label><input name="user" autocomplete="off"></div>
+      <div class="f"><label>連線字串（選填，會取代上面的主機 / 連接埠 / 服務名稱）</label><input name="connectString" placeholder="host:port/service 或完整的 (DESCRIPTION=...)"><span class="hint">使用 Thin 模式，不需安裝 Oracle Client。密碼不會儲存，每次連線時輸入。</span></div>
+      <div class="row" style="justify-content:space-between;margin-top:6px">
+        <button type="button" class="danger" id="removeProfile">刪除</button>
+        <span class="row"><button type="button" class="secondary" id="cancelDlg">取消</button><button type="submit">儲存</button></span>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="pwDlg">
+    <form id="pwForm">
+      <h2>連線到 <span id="pwTarget"></span></h2>
+      <div class="f"><label>密碼</label><input name="password" type="password" autocomplete="off" required></div>
+      <div class="row" style="justify-content:flex-end"><button type="button" class="secondary" id="pwCancel">取消</button><button type="submit">連線</button></div>
+    </form>
+  </dialog>
+
+  <script src="tooldock://sdk/ui-sdk.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
