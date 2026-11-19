@@ -369,8 +369,8 @@ function bindDetail(d) {
     el.addEventListener('change', () => updateControls());
   });
   const on = (/** @type {string} */ sel, /** @type {() => void} */ fn) => { const b = document.querySelector(sel); if (b) /** @type {HTMLElement} */ (b).onclick = fn; };
-  on('#xDryBtn', () => run('dry'));
-  on('#xExecBtn', () => run('exec'));
+  on('#xDryBtn', () => runImport('dry'));
+  on('#xExecBtn', () => runImport('exec'));
   on('#xRejectBtn', async () => {
     if (!(await ask(`拒絕執行「${d.pkg.title}」？`, '產生端會收到「未執行」，資料庫不會有任何變更。', '拒絕'))) return;
     try { await td.invoke('exchange.reject', d.key); } catch (err) { td.toast(msgOf(err), 'error'); }
@@ -397,7 +397,7 @@ function bindDetail(d) {
 }
 
 /** @param {'dry' | 'exec'} which */
-async function run(which) {
+async function runImport(which) {
   const d = xui.detail;
   if (!d || xui.busy) return;
   const inp = readInputs(d);
