@@ -75,7 +75,8 @@ ToolDock 擴充：連線 Oracle 資料庫並執行 SQL 指令，查詢結果以�
 - **查詢結果**：查詢結果會傳回給產生端，例如交給報表產生器做成報表。
   - 預設每次最多回傳 10,000 列，可用設定調整；整包不超過 10 MB。
   - `NUMBER` 以字串傳回，不會失去精度。`DATE`／`TIMESTAMP` 以帶時區的 ISO 8601 傳回。
-  - 從 `.tdx` 檔匯入時沒有產生端，結果只顯示在畫面上，可以用「⇄ 分享結果」交給其他工具。
+  - 執行完成後，每個查詢結果都可以用「⇄ 分享結果」以 `tooldock.table` 分享出去，例如交給報表產生器做成報表，或交給資料轉換工具轉成 CSV / JSON；有多個工具可以接收時，ToolDock 會讓你選擇。
+  - 從 `.tdx` 檔匯入時沒有產生端，結果只會顯示在畫面上，要交給其他工具請用「⇄ 分享結果」。
 - **安全限制**：
   - **DDL 一律拒絕**：Oracle 的 DDL 會隱含提交，無法回復。
   - PL/SQL 區塊、`CALL`、`GRANT` 等語句一律拒絕。
@@ -120,10 +121,16 @@ npm install
 npm run dev      # 以開發模式啟動 ToolDock
 npm run debug    # 同上，並開啟後端偵錯埠 9229
 npm run pack     # 打包成 dist/*.tbx
-npm test         # tooldock.sql 解析與型別轉換的單元測試
+npm test         # 單元測試與接收端往返測試（不需要資料庫的部分）
 ```
 
-`test/oracle.test.js` 會連到真正的 Oracle，測試交易、試跑、`expect`、`maxRows` 與型別轉換。沒有設定下面的環境變數時，這個測試會略過。測試會建立名稱以 `TDX_T_` 開頭的暫時資料表，結束時刪除：
+| 測試檔 | 內容 |
+|---|---|
+| `test/sql-exchange.test.js` | `tooldock.sql` 的解析、分類、型別轉換 |
+| `test/exchange.test.js` | 接收端往返：用假的 `ctx` 送交換包給 `backend/exchange.js`，檢查產生端拿到的 `ImportResult`。<br>不需要資料庫：拒絕、取消、擴充停止、不允許的語句、未試跑、缺密碼。<br>需要資料庫：執行成功的結果、從檔案匯入時不回傳結果、分享查詢結果（`tooldock.table`）、執行失敗、重複匯入 |
+| `test/oracle.test.js` | 需要資料庫：交易、試跑、`expect`、`maxRows` 與型別轉換 |
+
+需要資料庫的測試會連到真正的 Oracle，沒有設定下面的環境變數時會略過。測試會建立名稱以 `TDX_T_`、`TDX_X_` 開頭的暫時資料表，結束時刪除：
 
 ```bash
 ORACLE_TEST_CONNECT=localhost:1521/FREEPDB1 ORACLE_TEST_USER=tdx_test ORACLE_TEST_PASSWORD=… npm test
