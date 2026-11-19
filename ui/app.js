@@ -31,7 +31,7 @@ const autoCommit = $('#autoCommit');
 const schemaSel = $('#schema');
 
 /** @typedef {{ id: string, name: string, host: string, port: number, serviceName: string, user: string, connectString?: string }} Profile */
-/** @typedef {{ id: string, profile: Profile, pending: boolean, running: boolean, dbName: string, schema: string, serverVersion: string }} Session */
+/** @typedef {{ id: string, seq: number, profile: Profile, pending: boolean, running: boolean, dbName: string, schema: string, serverVersion: string }} Session */
 /** @typedef {{ sessions: Session[], maxSessions: number, autoCommit: boolean, maxRows: number }} State */
 /** @typedef {{ id: string, name: string, sql: string, updatedAt: number }} Snippet */
 /** @typedef {{ NAME: string, TYPE: string, NUM_ROWS: number | null, COMMENTS: string | null }} DbObject */
@@ -47,7 +47,7 @@ const ui = {
   /** @type {string[]} */ history: [],
   /** @type {Snippet[]} */ snippets: [],
   /** @type {State} */ state: { sessions: [], maxSessions: 5, autoCommit: false, maxRows: 500 },
-  /** @type {string | null} 目前操作的連線 id（= 連線設定 id） */ activeSid: null,
+  /** @type {string | null} 目前操作的連線 id（第一條 = 連線設定 id，之後為「設定 id#2」…） */ activeSid: null,
   /** @type {any[]} */ results: [],
   active: 0,
   /** @type {DbObject[]} */ objects: [],
@@ -65,6 +65,10 @@ const msgOf = (err) => (err instanceof Error ? err.message : String(err));
 const btn = (sel) => /** @type {HTMLButtonElement} */ ($(sel));
 /** @returns {Session | null} */
 const cur = () => ui.state.sessions.find((s) => s.id === ui.activeSid) || null;
+/** 分頁上的名稱：同一組設定的第二條起加上 #編號 @param {Session} s */
+const sessName = (s) => `${s.profile.name}${s.seq > 1 ? ` #${s.seq}` : ''}`;
+/** 這組連線設定已開啟的連線（依編號排序） @param {string} profileId */
+const sessionsOf = (profileId) => ui.state.sessions.filter((s) => s.profile.id === profileId).sort((a, b) => a.seq - b.seq);
 /** @param {Profile} p */
 const target = (p) => `${p.user}@${p.connectString || `${p.host}:${p.port}/${p.serviceName}`}`;
 
@@ -111,16 +115,23 @@ function applyActive() {
   autoCommit.checked = st.autoCommit;
 
   const selected = profileSel.value;
-  const selectedOpen = st.sessions.some((x) => x.id === selected);
+  const selectedOpen = sessionsOf(selected).length > 0;
+  const onSelected = !!(s && s.profile.id === selected);
   const full = st.sessions.length >= st.maxSessions;
-  $('#connectBtn').textContent = selectedOpen ? (selected === ui.activeSid ? '已連線' : '切換') : '連線';
-  btn('#connectBtn').disabled = (selectedOpen && selected === ui.activeSid) || (!selectedOpen && full && ui.profiles.length > 0);
+  $('#connectBtn').textContent = selectedOpen ? (onSelected ? '已連線' : '切換') : '連線';
+  btn('#connectBtn').disabled = onSelected || (!selectedOpen && full && ui.profiles.length > 0);
   btn('#connectBtn').title = !selectedOpen && full
     ? `已達 ${st.maxSessions} 條連線上限，請先中斷其中一條`
-    : '開啟這組連線；已開啟時切換過去（最多同時 5 條）';
+    : `開啟這組連線；已開啟時切換過去（最多同時 ${st.maxSessions} 條）`;
+  // 這組設定已開啟時，可以再開一條（各自獨立的交易與工作區）
+  btn('#connectNewBtn').hidden = !selectedOpen;
+  btn('#connectNewBtn').disabled = full;
+  btn('#connectNewBtn').title = full
+    ? `已達 ${st.maxSessions} 條連線上限，請先中斷其中一條`
+    : '用同一組連線設定再開一條連線：交易、編輯器與查詢結果都和原本的分開';
 
   $('#connInfo').innerHTML = s
-    ? `<span class="badge ok">${td.escape(s.profile.name)}</span> ${td.escape(target(s.profile))}${s.pending ? ' <span class="badge warn">有未提交的交易</span>' : ''}`
+    ? `<span class="badge ok">${td.escape(sessName(s))}</span> ${td.escape(target(s.profile))}${s.pending ? ' <span class="badge warn">有未提交的交易</span>' : ''}`
     : st.sessions.length ? '' : '<span class="badge">未連線</span>';
   $('#footRight').textContent = s && s.running ? '執行中…' : `最多顯示 ${st.maxRows} 列　${st.autoCommit ? '自動提交' : '手動提交'}`;
 }
@@ -133,7 +144,7 @@ function renderSessions() {
     const dot = s.running ? 'running' : s.pending ? 'pending' : '';
     const tip = `${target(s.profile)}${s.pending ? '\n有未提交的交易' : ''}${s.running ? '\n執行中' : ''}\n⌘/Ctrl + ${i + 1} 切換`;
     return `<button class="sess ${s.id === ui.activeSid ? 'on' : ''}" data-sid="${td.escape(s.id)}" title="${td.escape(tip)}">
-      <span class="dot ${dot}"></span>${td.escape(s.profile.name)}<span class="x" data-close="${td.escape(s.id)}" title="中斷這條連線">×</span></button>`;
+      <span class="dot ${dot}"></span>${td.escape(sessName(s))}<span class="x" data-close="${td.escape(s.id)}" title="中斷這條連線">×</span></button>`;
   }).join('') + `<span id="sessCount">${list.length} / ${ui.state.maxSessions} 條連線</span>`;
 }
 
@@ -225,27 +236,27 @@ async function switchTo(sid) {
 async function closeSession(sid) {
   const s = ui.state.sessions.find((x) => x.id === sid);
   if (!s) return;
-  if (s.running) { td.toast(`「${s.profile.name}」還有指令在執行，請先停止`, 'warn'); return; }
+  if (s.running) { td.toast(`「${sessName(s)}」還有指令在執行，請先停止`, 'warn'); return; }
   let opts = {};
   if (s.pending) {
-    const r = await td.dialog.message({ type: 'question', message: `「${s.profile.name}」有未提交的交易`, detail: '中斷連線前要提交（Commit）還是回滾（Rollback）？', buttons: ['Commit', 'Rollback', '取消'], defaultId: 1, cancelId: 2 });
+    const r = await td.dialog.message({ type: 'question', message: `「${sessName(s)}」有未提交的交易`, detail: '中斷連線前要提交（Commit）還是回滾（Rollback）？', buttons: ['Commit', 'Rollback', '取消'], defaultId: 1, cancelId: 2 });
     if (r.response === 2) return;
     opts = { commit: r.response === 0 };
   }
   try {
     applyState(await td.invoke('disconnect', sid, opts));
-    setFoot(`已中斷「${s.profile.name}」`);
+    setFoot(`已中斷「${sessName(s)}」`);
   } catch (err) { td.toast(msgOf(err), 'error'); }
 }
 
 function renderProfiles() {
   const selected = profileSel.value;
-  const open = new Set(ui.state.sessions.map((s) => s.id));
+  const open = new Set(ui.state.sessions.map((s) => s.profile.id));
   profileSel.innerHTML = ui.profiles.length
     ? ui.profiles.map((p) => `<option value="${p.id}">${open.has(p.id) ? '● ' : ''}${ui.savedPasswords.includes(p.id) ? '🔑 ' : ''}${td.escape(p.name)}</option>`).join('')
     : '<option value="">（尚無連線設定）</option>';
   if (ui.profiles.some((p) => p.id === selected)) profileSel.value = selected;
-  else if (ui.activeSid && ui.profiles.some((p) => p.id === ui.activeSid)) profileSel.value = ui.activeSid;
+  else if (cur() && ui.profiles.some((p) => p.id === cur()?.profile.id)) profileSel.value = /** @type {Session} */ (cur()).profile.id;
 }
 profileSel.addEventListener('change', applyActive);
 
@@ -294,7 +305,7 @@ form.addEventListener('submit', async (e) => {
     await refresh();
     profileSel.value = saved.id;
     applyActive();
-    if (ui.state.sessions.some((x) => x.id === saved.id)) td.toast('連線設定已儲存，重新連線後才會套用', 'info');
+    if (sessionsOf(saved.id).length) td.toast('連線設定已儲存，重新連線後才會套用', 'info');
   } catch (err) { td.toast(msgOf(err), 'error'); }
 });
 $('#cancelDlg').onclick = () => dlg.close();
@@ -302,8 +313,8 @@ $('#newProfile').onclick = () => openProfile(null);
 $('#editProfile').onclick = () => openProfile(ui.profiles.find((p) => p.id === profileSel.value) || null);
 $('#removeProfile').onclick = async () => {
   const id = /** @type {any} */ (form.elements).profileId.value;
-  const open = ui.state.sessions.find((x) => x.id === id);
-  const detail = `記住的密碼也會一併清除。${open ? `\n這組連線目前開啟中，會先中斷${open.pending ? '（未提交的交易會回滾）' : ''}。` : ''}`;
+  const open = sessionsOf(id);
+  const detail = `記住的密碼也會一併清除。${open.length ? `\n這組連線目前開啟中，會先中斷${open.length > 1 ? `全部 ${open.length} 條` : ''}${open.some((x) => x.pending) ? '（未提交的交易會回滾）' : ''}。` : ''}`;
   const r = await td.dialog.message({ type: 'warning', message: '刪除這個連線設定？', detail, buttons: ['刪除', '取消'], defaultId: 1, cancelId: 1 });
   if (r.response !== 0) return;
   await td.invoke('removeProfile', id);
@@ -329,7 +340,7 @@ async function afterConnect(r) {
   renderProfiles();
   await switchTo(r.session.id);
   applyActive();
-  if (!r.already) setFoot(`已連線「${r.session.profile.name}」：${r.session.dbName}（schema ${r.session.schema}），Oracle ${r.session.serverVersion}`);
+  if (!r.already) setFoot(`已連線「${sessName(r.session)}」：${r.session.dbName}（schema ${r.session.schema}），Oracle ${r.session.serverVersion}`);
   if (r.rememberError) td.toast(r.rememberError, 'warn');
 }
 
@@ -339,11 +350,12 @@ function connectFailed(title, err) {
   td.dialog.message({ type: 'error', message: title, detail: msgOf(err) });
 }
 
-/** @param {Profile} p @param {string} [reason] */
-function askPassword(p, reason) {
+/** @param {Profile} p @param {string} [reason] @param {boolean} [newSession] 另開一條 */
+function askPassword(p, reason, newSession = false) {
   $('#pwTarget').textContent = p.name;
   pwForm.reset();
   pwForm.dataset.pid = p.id;
+  pwForm.dataset.newSession = newSession ? '1' : '';
   $('#pwReason').hidden = !reason;
   $('#pwReason').textContent = reason || '';
   $('#rememberRow').hidden = !ui.secretsAvailable;
@@ -351,22 +363,30 @@ function askPassword(p, reason) {
   pwDlg.showModal();
 }
 
-$('#connectBtn').onclick = async () => {
+/**
+ * 連線（已開啟時切換過去）；newSession 時用同一組設定另開一條
+ * @param {boolean} newSession
+ */
+async function connectSelected(newSession) {
   const p = ui.profiles.find((x) => x.id === profileSel.value);
   if (!p) { openProfile(null); return; }
-  if (ui.state.sessions.some((s) => s.id === p.id)) { await switchTo(p.id); return; }
-  if (!ui.savedPasswords.includes(p.id)) { askPassword(p); return; }
+  const open = sessionsOf(p.id);
+  if (open.length && !newSession) { await switchTo(open[0].id); return; }
+  if (!ui.savedPasswords.includes(p.id)) { askPassword(p, undefined, newSession); return; }
   // 有記住密碼：直接連線
   $('#connInfo').innerHTML = `<span class="badge info">連線到「${td.escape(p.name)}」中…</span>`;
   btn('#connectBtn').disabled = true;
+  btn('#connectNewBtn').disabled = true;
   try {
-    const r = await td.invoke('connect', p.id, null);
-    if (r.needPassword) { applyActive(); askPassword(p, r.reason); return; }
+    const r = await td.invoke('connect', p.id, null, { newSession: newSession || undefined });
+    if (r.needPassword) { applyActive(); askPassword(p, r.reason, newSession); return; }
     await afterConnect(r);
   } catch (err) {
     connectFailed(`無法連線到「${p.name}」`, err);
   }
-};
+}
+$('#connectBtn').onclick = () => connectSelected(false);
+$('#connectNewBtn').onclick = () => connectSelected(true);
 $('#pwCancel').onclick = () => pwDlg.close();
 pwForm.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -379,7 +399,7 @@ pwForm.addEventListener('submit', async (e) => {
   $('#connInfo').innerHTML = `<span class="badge info">連線到「${td.escape(p.name)}」中…</span>`;
   btn('#connectBtn').disabled = true;
   try {
-    const r = await td.invoke('connect', p.id, password, { remember: remember || undefined });
+    const r = await td.invoke('connect', p.id, password, { remember: remember || undefined, newSession: pwForm.dataset.newSession === '1' || undefined });
     await afterConnect(r);
     if (remember && !r.rememberError) td.toast('已記住密碼，下次連線不需再輸入', 'success');
   } catch (err) {
@@ -481,7 +501,7 @@ async function run(which) {
       // 執行期間切到別的連線：結果留在原連線的工作區
       const w = workspaces.get(sid);
       if (w) Object.assign(w, { results: r.results, active, foot });
-      td.toast(`「${s.profile.name}」${failed ? '執行發生錯誤' : '執行完成'}`, failed ? 'error' : 'info');
+      td.toast(`「${sessName(s)}」${failed ? '執行發生錯誤' : '執行完成'}`, failed ? 'error' : 'info');
       return;
     }
     ui.results = r.results;
@@ -490,7 +510,7 @@ async function run(which) {
     renderResults();
     setFoot(foot);
   } catch (err) {
-    if (sid !== ui.activeSid) { td.toast(`「${s.profile.name}」無法執行：${msgOf(err)}`, 'error'); return; }
+    if (sid !== ui.activeSid) { td.toast(`「${sessName(s)}」無法執行：${msgOf(err)}`, 'error'); return; }
     showMessage('無法執行', msgOf(err), true);
     setFoot('');
   }
@@ -582,12 +602,26 @@ function renderResults() {
   const body = r.rows.map((/** @type {any[]} */ row, /** @type {number} */ n) => `<tr><td class="rn">${n + 1}</td>${row.map((v) => (v === null ? '<td class="null">NULL</td>' : `<td class="${typeof v === 'number' ? 'num' : ''}" title="${td.escape(v)}">${td.escape(v)}</td>`)).join('')}</tr>`).join('');
   $('#pane').innerHTML = `<div class="row" style="padding:6px 12px;font-size:12px">
       <span class="muted">${r.rows.length} 列${r.truncated ? `（只顯示前 ${r.rows.length} 列，可在設定調整上限）` : ''}　${r.ms} ms</span>${boundChips(r)}
-      <span class="spacer"></span><button class="ghost" id="csvBtn">匯出 CSV</button></div>
+      <span class="spacer"></span><button class="ghost" id="csvBtn" title="存成 CSV 檔（UTF-8，Excel 可直接開啟）">匯出 CSV</button>${/** @type {any} */ (td).exchange ? '<button class="ghost" id="shareBtn" title="把結果交給其他工具，例如報表產生器、資料轉換">⇄ 分享結果…</button>' : ''}</div>
     <table class="grid"><thead>${head}</thead><tbody>${body}</tbody></table>${out}`;
   $('#csvBtn').onclick = async () => {
-    const file = await td.invoke('exportCsv', { columns: r.columns, rows: r.rows });
-    if (file) td.toast(`已匯出 ${file}`, 'success');
+    try {
+      const file = await td.invoke('exportCsv', { columns: r.columns, rows: r.rows });
+      if (file) td.toast(`已匯出 ${file}`, 'success');
+    } catch (err) { td.toast(msgOf(err), 'error'); }
   };
+  const share = document.getElementById('shareBtn');
+  if (share) {
+    share.onclick = async () => {
+      const s = cur();
+      try {
+        const res = await td.invoke('shareTable', { columns: r.columns, rows: r.rows, sql: r.sql, truncated: r.truncated, profile: s ? sessName(s) : '' });
+        /** @type {Record<string, string>} */
+        const msg = { delivered: `已交給「${res.receiver && res.receiver.name}」`, exported: `已存成 ${res.filePath}`, 'no-receiver': '沒有可接收的工具', cancelled: '已取消', error: `失敗：${res.message}` };
+        td.toast(msg[res.status] || res.status, res.status === 'error' ? 'error' : 'info');
+      } catch (err) { td.toast(msgOf(err), 'error'); }
+    };
+  }
 }
 
 $('#tabs').addEventListener('click', (e) => {
